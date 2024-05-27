@@ -57,7 +57,7 @@ set_tests_properties( "examples/example1_dot_product" ${SPIREX}
 
 # devices which don't support SPIR
 set_property(TEST "examples/example1_dot_product"
-  APPEND PROPERTY LABELS "hsa;hsa-native;vulkan")
+  APPEND PROPERTY LABELS "hsa;hsa-native;vulkan;mlir")
 
 if(SPIREX AND NOT HOST_CPU_ENABLE_SPIRV)
   set_property(TEST ${SPIREX} APPEND PROPERTY LABELS "cpu_fail")

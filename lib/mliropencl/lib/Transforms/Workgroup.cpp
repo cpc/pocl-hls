@@ -31,7 +31,6 @@
 #include <mlir/IR/AffineExpr.h>
 #include <mlir/IR/AffineMap.h>
 #include <mlir/IR/BuiltinAttributes.h>
-#include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/BuiltinTypes.h>
 #include <mlir/IR/IRMapping.h>
 #include <mlir/IR/MLIRContext.h>
@@ -40,9 +39,9 @@
 #include <mlir/Pass/Pass.h>
 #include <mlir/Transforms/InliningUtils.h>
 
+#include "pocl/Dialect/Dialect.hh"
 #include "pocl/Dialect/PoclOps.hh"
 #include "pocl/Transforms/Passes.hh"
-#include "llvm/ADT/STLExtras.h"
 
 #include "pocl_util.h"
 
@@ -209,6 +208,11 @@ struct Workgroup : public impl::WorkgroupBase<Workgroup> {
     mlir::Value IdxX = AffineParallelOp.getRegion().front().getArgument(0);
     mlir::Value IdxY = AffineParallelOp.getRegion().front().getArgument(1);
     mlir::Value IdxZ = AffineParallelOp.getRegion().front().getArgument(2);
+    llvm::SmallVector<mlir::Value, 3> barrierArgs = {IdxX, IdxY, IdxZ};
+    FuncOp->walk([&](mlir::gpu::BarrierOp op) {
+      Builder.setInsertionPoint(op);
+      Builder.replaceOpWithNewOp<mlir::pocl::BarrierOp>(op, barrierArgs);
+    });
 
     int Counter = 0;
     FuncOp->walk([&](mlir::affine::AffineStoreOp Storeop) {
@@ -272,19 +276,19 @@ struct Workgroup : public impl::WorkgroupBase<Workgroup> {
       auto Arg = EntryBlock->getArgument(I);
       NewKernelArguments.push_back(Arg);
     }
-    mlir::Type SizeTArgType = Builder.getIntegerType(SizeTWidth);
+    mlir::Type IndexType = Builder.getIndexType();
     mlir::Type IntArgType = Builder.getIntegerType(32);
     // The pocl_context as hidden args
     for (int I = 0; I < 11; I++) {
-      UpdatedArgs.push_back(SizeTArgType);
-      EntryBlock->addArgument(SizeTArgType, Builder.getUnknownLoc());
+      UpdatedArgs.push_back(IndexType);
+      EntryBlock->addArgument(IndexType, Builder.getUnknownLoc());
     }
     // printf_buffer_capacity
     UpdatedArgs.push_back(IntArgType);
     EntryBlock->addArgument(IntArgType, Builder.getUnknownLoc());
     // global_var_buffer
-    UpdatedArgs.push_back(SizeTArgType);
-    EntryBlock->addArgument(SizeTArgType, Builder.getUnknownLoc());
+    UpdatedArgs.push_back(IndexType);
+    EntryBlock->addArgument(IndexType, Builder.getUnknownLoc());
     // work_dim
     UpdatedArgs.push_back(IntArgType);
     EntryBlock->addArgument(IntArgType, Builder.getUnknownLoc());
@@ -294,8 +298,8 @@ struct Workgroup : public impl::WorkgroupBase<Workgroup> {
 
     // The global workgroup ids are passed to kernel as hidden args
     for (int I = 0; I < GROUP_ID_NUM_DIMENSIONS_AS_ARGS; I++) {
-      UpdatedArgs.push_back(SizeTArgType);
-      EntryBlock->addArgument(SizeTArgType, Builder.getUnknownLoc());
+      UpdatedArgs.push_back(IndexType);
+      EntryBlock->addArgument(IndexType, Builder.getUnknownLoc());
     }
 
     mlir::FunctionType UpdatedFuncType =
@@ -310,22 +314,17 @@ struct Workgroup : public impl::WorkgroupBase<Workgroup> {
                      mlir::gpu::Dimension::z}) {
       F->walk([&](mlir::gpu::BlockDimOp LocalSizeOp) {
         if (LocalSizeOp.getDimension() == Dim) {
-          mlir::Operation *LocalSizeValue;
           int LocalSizeOffsetFromEnd = GROUP_ID_NUM_DIMENSIONS_AS_ARGS +
                                        POCL_CONTEXT_NUM_ELEMENTS_AS_ARGS - 6;
           if (WGDynamicLocalSize) {
             int TotalNumOfArguments = F.getFunctionBody().getNumArguments();
             auto LocalSize = F.getFunctionBody().getArgument(
                 TotalNumOfArguments - LocalSizeOffsetFromEnd + I);
-
-            LocalSizeValue = mlir::arith::IndexCastOp::create(
-                Builder, LocalSizeOp.getLoc(), Builder.getIndexType(),
-                LocalSize);
+            Builder.replaceOp(LocalSizeOp, LocalSize);
           } else {
-            LocalSizeValue = mlir::arith::ConstantIndexOp::create(
-                Builder, LocalSizeOp.getLoc(), WGLocalSize[I]);
+            Builder.replaceOpWithNewOp<mlir::arith::ConstantIndexOp>(
+                LocalSizeOp, WGLocalSize[I]);
           }
-          Builder.replaceOp(LocalSizeOp, LocalSizeValue);
         }
       });
       I++;
@@ -341,9 +340,7 @@ struct Workgroup : public impl::WorkgroupBase<Workgroup> {
           auto GridDim = F.getFunctionBody().getArgument(
               TotalNumOfArguments - GridDimOffsetFromEnd + I);
 
-          auto GridDimValue = mlir::arith::IndexCastOp::create(
-              Builder, GridDimOp.getLoc(), Builder.getIndexType(), GridDim);
-          Builder.replaceOp(GridDimOp, GridDimValue);
+          Builder.replaceOp(GridDimOp, GridDim);
         }
       });
       I++;
@@ -357,9 +354,7 @@ struct Workgroup : public impl::WorkgroupBase<Workgroup> {
           auto GroupId = F.getFunctionBody().getArgument(
               TotalNumOfArguments - GROUP_ID_NUM_DIMENSIONS_AS_ARGS + I);
 
-          auto CastedGroupId = mlir::arith::IndexCastOp::create(
-              Builder, GroupIdOp.getLoc(), Builder.getIndexType(), GroupId);
-          Builder.replaceOp(GroupIdOp, CastedGroupId);
+          Builder.replaceOp(GroupIdOp, GroupId);
         }
       });
       I++;

@@ -1868,6 +1868,10 @@ endif()
 # thus requires a C++ compiler, so let's not.
 if(ENABLE_ALMAIF_DEVICE)
 
+    set(OPAE_BOARD_DIR "/opt/intel/oneapi/board/ia420f")
+    set(ONEAPI_DIR "/opt/intel/oneapi/compiler/2024.1/opt/oclfpga")
+    set(HAVE_OPAE 0 CACHE BOOL "have OPAE")
+
   if(NOT HAVE_XRT AND DEFINED ENV{XILINX_XRT})
     set(XRT $ENV{XILINX_XRT})
 

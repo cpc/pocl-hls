@@ -226,6 +226,10 @@ set_property(TEST
   APPEND PROPERTY LABELS "level0")
 
 set_property(TEST
+  "workgroup/barriered_for_loops_cbs"
+  "workgroup/issue_1747_wg_divergent_barrier_cbs"
+  "workgroup/issue_548_convergent_propagation_cbs"
+  "workgroup/loop_with_two_paths_to_the_latch_cbs"
   "workgroup/range_md_large_grid_cbs"
   "workgroup/range_md_small_grid_cbs"
   "workgroup/unbarriered_for_loops_cbs"

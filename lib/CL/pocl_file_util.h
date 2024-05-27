@@ -47,6 +47,7 @@ typedef struct pocl_dir_iter_s {
 } pocl_dir_iter;
 
 /** Remove a directory, recursively */
+POCL_EXPORT
 int pocl_rm_rf(const char* path);
 
 /** Make a directory, including all directories along path */

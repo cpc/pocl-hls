@@ -43,8 +43,10 @@ XilinxXrtRegion::XilinxXrtRegion(size_t Address, size_t RegionSize,
   Size_ = RegionSize;
   Kernel_ = kernel;
   DeviceOffset_ = DeviceOffset;
-  assert(Kernel_ != XRT_NULL_HANDLE &&
-         "xrtKernelHandle NULL, is the kernel opened properly?");
+  // Kernel_ may be null when the device is initialized without an initial
+  // xclbin; the handle is set later via setKernelPtr() when the first kernel
+  // bitstream is loaded. Hardware access attempts with a null handle will
+  // assert in Read32/Write32/etc.
 }
 
 XilinxXrtRegion::XilinxXrtRegion(size_t Address, size_t RegionSize,
@@ -73,21 +75,6 @@ XilinxXrtRegion::XilinxXrtRegion(size_t Address, size_t RegionSize,
                              i - 4);
 }
 
-void XilinxXrtRegion::initRegion(const std::string &init_file) {
-  std::ifstream inFile;
-  inFile.open(init_file, std::ios::binary);
-  unsigned int current;
-  int i = 0;
-  while (inFile.good()) {
-    inFile.read(reinterpret_cast<char *>(&current), sizeof(current));
-    Write32(i, current);
-    i += 4;
-  }
-
-  POCL_MSG_PRINT_ALMAIF_MMAP("MMAP: Initialized region with %i bytes \n",
-                             i - 4);
-}
-
 uint32_t XilinxXrtRegion::Read32(size_t offset) {
   POCL_MSG_PRINT_ALMAIF_MMAP("XRTMMAP: Reading from region at 0x%zx with "
                              "offset 0x%zx\n",
@@ -111,63 +98,6 @@ void XilinxXrtRegion::Write32(size_t offset, uint32_t value) {
   assert(offset < Size_ && "Attempt to access data outside MMAP'd buffer");
   ((xrt::ip *)Kernel_)
       ->write_register(PhysAddress_ + offset - DeviceOffset_, value);
-}
-
-void XilinxXrtRegion::Write64(size_t offset, uint64_t value) {
-  POCL_MSG_PRINT_ALMAIF_MMAP("XRTMMAP: Writing 64b to region at 0x%zx with "
-                             "offset 0x%zx\n",
-                             PhysAddress_,
-                             PhysAddress_ + offset - DeviceOffset_);
-  assert(Kernel_ != XRT_NULL_HANDLE &&
-         "No kernel handle; write before mapping?");
-  assert(offset < Size_ && "Attempt to access data outside MMAP'd buffer");
-  ((xrt::ip *)Kernel_)
-      ->write_register(PhysAddress_ + offset - DeviceOffset_, value);
-  ((xrt::ip *)Kernel_)
-      ->write_register(PhysAddress_ + offset - DeviceOffset_ + 4, value >> 32);
-}
-
-void XilinxXrtRegion::Write16(size_t offset, uint16_t value) {
-  POCL_MSG_PRINT_ALMAIF_MMAP(
-      "XRTMMAP: Writing 16b to region at 0x%zx with "
-      "offset 0x%zx, DeviceOffset 0x%zx and total offset 0x%zx\n",
-      PhysAddress_, offset, DeviceOffset_,
-      PhysAddress_ + offset - DeviceOffset_);
-  assert(Kernel_ != XRT_NULL_HANDLE &&
-         "No kernel handle; write before mapping?");
-  assert(offset < Size_ && "Attempt to access data outside MMAP'd buffer");
-
-  uint32_t old_value =
-      ((xrt::ip *)Kernel_)
-          ->read_register(PhysAddress_ + (offset & 0xFFFFFFFC) - DeviceOffset_);
-
-  uint32_t new_value = 0;
-  if ((offset & 0b10) == 0) {
-    new_value = (old_value & 0xFFFF0000) | (uint32_t)value;
-  } else {
-    new_value = ((uint32_t)value << 16) | (old_value & 0xFFFF);
-  }
-  ((xrt::ip *)Kernel_)
-      ->write_register(PhysAddress_ + (offset & 0xFFFFFFFC) - DeviceOffset_,
-                       new_value);
-}
-
-uint64_t XilinxXrtRegion::Read64(size_t offset) {
-  POCL_MSG_PRINT_ALMAIF_MMAP("XRTMMAP: Reading 64b from region at 0x%zx with "
-                             "offset 0x%zx\n",
-                             PhysAddress_,
-                             PhysAddress_ + offset - DeviceOffset_);
-  assert(Kernel_ != XRT_NULL_HANDLE &&
-         "No kernel handle; write before mapping?");
-  assert(offset < Size_ && "Attempt to access data outside MMAP'd buffer");
-  uint32_t value_low =
-      ((xrt::ip *)Kernel_)
-          ->read_register(PhysAddress_ + offset - DeviceOffset_);
-  uint32_t value_high =
-      ((xrt::ip *)Kernel_)
-          ->read_register(PhysAddress_ + offset - DeviceOffset_ + 4);
-  uint64_t value = ((uint64_t)value_high << 32) | value_low;
-  return value;
 }
 
 void XilinxXrtRegion::CopyToMMAP(size_t destination, const void *source,
@@ -198,7 +128,7 @@ void XilinxXrtRegion::CopyFromMMAP(void *destination, size_t source,
   size_t offset = source - PhysAddress_;
   POCL_MSG_PRINT_ALMAIF_MMAP(
       "XRTMMAP: Reading 0x%zx bytes from region at 0x%zx "
-      "with address 0x%zx and offset\n",
+      "with address 0x%zx and offset 0x%zx\n",
       bytes, PhysAddress_, source, offset);
   assert(offset < Size_ && "Attempt to access data outside XRT memory");
   assert((offset & 0b11) == 0 &&

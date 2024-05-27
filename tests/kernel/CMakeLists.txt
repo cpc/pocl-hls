@@ -425,6 +425,7 @@ set_property(TEST
 if(ENABLE_MLIR)
 set_property(TEST
   "kernel/test_convert_sat_regression_cbs"
+  "kernel/test_sizeof_uint_cbs"
   APPEND PROPERTY LABELS "mlir")
 endif()
 

@@ -56,8 +56,8 @@ struct CommandMetadata
   uint32_t start_timestamp_high;
   uint32_t finish_timestamp_low;
   uint32_t finish_timestamp_high;
-  uint32_t reserved1;
-  uint32_t reserved2;
+  uint32_t kernel_func_ptr_low;
+  uint32_t kernel_func_ptr_high;
 };
 
 struct AQLQueueInfo
@@ -108,8 +108,8 @@ struct AQLDispatchPacket
   uint32_t kernarg_address_low;
   uint32_t kernarg_address_high;
 
-  uint32_t reserved1;
-  uint32_t reserved2;
+  uint32_t pocl_context32b_low;
+  uint32_t pocl_context32b_high;
 
   uint32_t cmd_metadata_low;
   uint32_t cmd_metadata_high;

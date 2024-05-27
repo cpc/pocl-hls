@@ -41,9 +41,12 @@ set(ALMAIF_SOURCES "AlmaifShared.hh"
                   "EmulationDevice.cc"
                   "EmulationDevice.hh"
                   "XilinxXrtDevice.hh"
+                  "altera/AlteraOpaeDevice.hh"
                   "AlmaifCompile.cc"
                   "AlmaifCompile.hh"
                   "openasip/AlmaifCompileOpenasip.hh"
+                  "mlir/AlmaifCompileMLIR.hh"
+                  "mlir/AlmaifCompileMLIR.cc"
                   )
 
 if(HAVE_XRT)
@@ -61,6 +64,16 @@ if(HAVE_XRT)
                       "AlmaifDB/tiny-json.c"
                       "AlmaifDB/tiny-json.h"
                       )
+endif()
+
+if(HAVE_OPAE)
+    set(ALMAIF_SOURCES ${ALMAIF_SOURCES}
+                    "altera/AlteraOpaeDevice.cc"
+                    "altera/AlteraOpaeRegion.cc"
+                    "altera/AlteraOpaeRegion.hh"
+                    "altera/AlteraOpaeExternalRegion.cc"
+                    "altera/AlteraOpaeExternalRegion.hh"
+                    )
 endif()
 
 if(ENABLE_TCE)
@@ -81,6 +94,21 @@ if(HAVE_XRT)
     target_link_libraries(pocl-devices-almaif PRIVATE "${XRT_LIBDIR}/libxrt_coreutil.so")
 endif()
 
+if(HAVE_OPAE)
+	target_include_directories(pocl-devices-almaif PRIVATE "${OPAE_BOARD_DIR}/source/host")
+	target_include_directories(pocl-devices-almaif PRIVATE "${OPAE_BOARD_DIR}/linux64/include")
+       	target_include_directories(pocl-devices-almaif PRIVATE "${OPAE_BOARD_DIR}/source/include")
+       	target_include_directories(pocl-devices-almaif PRIVATE "${OPAE_BOARD_DIR}/source/extra/intel-fpga-bbb/BBB_cci_mpf/sw/include/")
+	#add_compile_options("-Wl,--no-as-needed")
+    	#add_compile_options("-L${OPAE_BOARD_DIR}/linux64/lib -L${ONEAPI_DIR}/host/linux64/lib")
+    #target_link_libraries(pocl-device-almaif PRIVATE "-lopae-c -lintel_opae_mmd -lMPF -luuid -lelf -lstdc++")
+    target_link_libraries(pocl-devices-almaif PRIVATE "opae-c")
+    target_link_libraries(pocl-devices-almaif PRIVATE "uuid")
+    target_link_libraries(pocl-devices-almaif PRIVATE "${OPAE_BOARD_DIR}/linux64/lib/libintel_opae_mmd.so")
+    target_link_libraries(pocl-devices-almaif PRIVATE "${OPAE_BOARD_DIR}/linux64/lib/libMPF.so")
+    target_link_libraries(pocl-devices-almaif PRIVATE "${ONEAPI_DIR}/host/linux64/lib/libelf.so")
+endif()
+
 if(ENABLE_TCE)
     target_link_libraries(pocl-devices-almaif PRIVATE ${TCE_LIBS})
 
@@ -91,3 +119,17 @@ endif()
 install(FILES "tce_builtins.cl"
         DESTINATION "${POCL_INSTALL_PRIVATE_DATADIR_REL}/almaif"
 	COMPONENT "lib")
+
+set(ADF "${CMAKE_CURRENT_SOURCE_DIR}/mlir/tta.adf")
+add_custom_command(
+  OUTPUT rtl_tta_core/platform/tta_core_toplevel.vhdl
+  COMMAND rm -rf rtl_tta_core
+  COMMAND LD_LIBRARY_PATH=${OPENASIP_LLVM_DIR}/lib generateprocessor -t --prefer-generation
+    -o rtl_tta_core -e tta_core --icd-arg-list=debugger:minimal
+    --hdb-list=generate_lsu_32.hdb,generate_rf_iu.hdb,xilinx_series7.hdb,generate_base32.hdb
+    -f onchip -d onchip -g AlmaIFIntegrator -p dummy.tpef ${ADF}
+  COMMAND LD_LIBRARY_PATH=${OPENASIP_LLVM_DIR}/lib generatebits -x rtl_tta_core -e tta_core ${ADF}
+  DEPENDS ${ADF})
+
+add_custom_target(rtl_tta_core ALL
+  DEPENDS rtl_tta_core/platform/tta_core_toplevel.vhdl)

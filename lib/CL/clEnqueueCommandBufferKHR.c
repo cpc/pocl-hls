@@ -111,6 +111,13 @@ POname (clEnqueueCommandBufferKHR) (cl_uint num_queues,
     }
   POCL_UNLOCK (command_buffer->mutex);
   POCL_RETURN_ERROR_COND ((!is_ready), CL_INVALID_OPERATION);
+  /* Submit to queue(s) */
+  if (num_used_queues == 1 && used_queues[0]->device->ops->run_command_buffer)
+    {
+      return used_queues[0]->device->ops->run_command_buffer (
+        used_queues[0]->device, command_buffer, num_events_in_wait_list,
+        event_wait_list, event_p);
+    }
 
   int runs_natively
     = (!command_buffer->is_multi_device)

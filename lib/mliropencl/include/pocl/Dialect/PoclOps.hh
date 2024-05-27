@@ -24,6 +24,8 @@
 #ifndef POCL_DIALECT_POCLOPS_HH
 #define POCL_DIALECT_POCLOPS_HH
 
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 #include <mlir/Interfaces/InferTypeOpInterface.h>
 
 #pragma GCC visibility push(default)

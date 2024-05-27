@@ -36,6 +36,7 @@ def Workgroup : Pass<"pocl-workgroup", "mlir::ModuleOp"> {
 	"mlir::func::FuncDialect",
 	"mlir::arith::ArithDialect",
 	"mlir::gpu::GPUDialect",
+	"mlir::pocl::PoclDialect",
 	];
 }
 
@@ -53,6 +54,10 @@ def ConvertMemrefToLLVMKernelArgs : Pass<"pocl-convert-memref-to-llvm-kernel-arg
 	let dependentDialects = [
 	"mlir::LLVM::LLVMDialect",
 	"mlir::gpu::GPUDialect",
+	];
+	let options = [
+	Option<"hasArgBufferLauncher", "has-arg-buffer-launcher", "bool", /*default=*/"false",
+		"Use sparse flat argbuffer layout (MAX_EXTENDED_ALIGNMENT spacing) instead of pointer-array indirection">
 	];
 }
 
@@ -75,6 +80,50 @@ def LowerOpenCLBuiltins : Pass<"pocl-lower-opencl-builtins", "mlir::ModuleOp"> {
 	"mlir::scf::SCFDialect",
 	"mlir::pocl::PoclDialect",
 	];
+}
+
+def Mem2Reg : Pass<"pocl-mem2reg", "mlir::ModuleOp"> {
+	let summary = "TODO";
+	let constructor = "mlir::pocl::createMem2RegPass()";
+	let dependentDialects = [
+	"mlir::memref::MemRefDialect",
+	"mlir::func::FuncDialect",
+	];
+}
+
+def DistributeBarriers : Pass<"pocl-distribute-barriers", "mlir::ModuleOp"> {
+  let summary = "remove scf.barrier";
+  let constructor = "mlir::pocl::createDistributeBarriersPass()";
+  let dependentDialects = [
+	"mlir::memref::MemRefDialect",
+	"mlir::func::FuncDialect",
+	"mlir::pocl::PoclDialect",
+	];
+  let options = [
+  Option<"method", "method", "std::string", /*default=*/"\"distribute\"", "Method of doing distribution">
+  ];
+}
+
+def AffineCFG : Pass<"pocl-affine-cfg", "mlir::ModuleOp"> {
+	let summary = "Replace scf.if and similar with affine.if. Replace memref load/store with affine equivalent.";
+	let constructor = "mlir::pocl::replaceAffineCFGPass()";
+	let dependentDialects = [
+	"mlir::affine::AffineDialect",
+	"mlir::scf::SCFDialect",
+	"mlir::memref::MemRefDialect"
+	];
+}
+
+def DetectReduction : Pass<"pocl-detect-reduction", "mlir::ModuleOp"> {
+	let summary = "TODO";
+	let constructor = "mlir::pocl::createDetectReductionPass()";
+	let dependentDialects = [
+	"mlir::affine::AffineDialect",
+	"mlir::scf::SCFDialect"
+	];
+  let statistics = [
+    Statistic<"numReductions", "num-reductions", "Number of reductions detected">
+  ];
 }
 
 def StripMemSpaces : Pass<"pocl-strip-memspaces", "mlir::ModuleOp"> {

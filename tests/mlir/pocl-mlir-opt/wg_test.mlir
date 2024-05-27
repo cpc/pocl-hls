@@ -19,14 +19,13 @@ module attributes {gpu.workgroup_size = array<i64: 8, 1, 1>} {
   }
 }
 
-// CHECK:    func.func @pocl_mlir_vecadd_kernel(%[[arg0:.+]]: memref<?xi32>, %[[arg1:.+]]: i32, %[[arg2:.+]]: i64, %[[arg3:.+]]: i64, %[[arg4:.+]]: i64)
+// CHECK:    func.func @pocl_mlir_vecadd_kernel(%[[arg0:.+]]: memref<?xi32>, %[[arg1:.+]]: i32, %[[arg2:.+]]: index, %[[arg3:.+]]: index, %[[arg4:.+]]: index)
 // CHECK-SAME: attributes {CL_arg_count = 2 : i64, gpu.kernel}
 
 // CHECK:      affine.parallel (%[[arg5:.+]], %[[arg6:.+]], %[[arg7:.+]]) = (0, 0, 0) to (8, 1, 1) {
 // CHECK-DAG:    %[[c8:.+]] = arith.constant 8 : index
-// CHECK-DAG:    %[[x0:.+]] = arith.index_cast %[[arg2]] : i64 to index
 // CHECK-DAG:    %[[c1_i32:.+]] = arith.constant 1 : i32
-// CHECK-DAG:    %[[x1:.+]] = arith.index_cast %[[x0]] : index to i64
+// CHECK-DAG:    %[[x1:.+]] = arith.index_cast %[[arg2]] : index to i64
 // CHECK-DAG:    %[[x2:.+]] = arith.index_cast %[[c8]] : index to i64
 // CHECK:        %[[x3:.+]] = arith.muli %[[x1]], %[[x2]] : i64
 // CHECK:        %[[x4:.+]] = arith.index_cast %[[arg5]] : index to i64

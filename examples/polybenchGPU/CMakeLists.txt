@@ -63,9 +63,9 @@ ExternalProject_Add(
   ${GIT_OPTIONS}
   CMAKE_ARGS
     ${UPSTREAM_CMAKE_ARGS}
-    -DUSE_SMALL_DATASET=OFF
-    -DENABLE_VERIFICATION=OFF
-    -DENQUEUE_ITERS=${NITERS}
+    -DUSE_SMALL_DATASET=ON
+    -DENABLE_VERIFICATION=ON
+    -DENQUEUE_ITERS=1
     "-DOPENCL_INCLUDE_PATH=${CMAKE_SOURCE_DIR}/include/"
     "-DOPENCL_opencl_LIBRARY:STRING=${OPENCL_LIBRARY}"
   INSTALL_COMMAND ""
@@ -204,14 +204,13 @@ set_tests_properties(
   polybenchGPU_SYR2K_cmd_buffer
   polybenchGPU_SYRK_cmd_buffer
   PROPERTIES
-  # RUN_SERIAL to avoid running anything else at the same time
-  RUN_SERIAL ON
   PASS_REGULAR_EXPRESSION "pass"
   FAIL_REGULAR_EXPRESSION "fail"
   SKIP_REGULAR_EXPRESSION "skipped"
-  LABELS "polybenchGPU;mlir")
+  LABELS "polybenchGPU;mlir"
+  ENVIRONMENT "XRT_INI_PATH=${CMAKE_SOURCE_DIR}/lib/CL/devices/almaif/mlir/xrt.ini;EMCONFIG_PATH=${CMAKE_BINARY_DIR}")
 
-set_tests_properties(
+set_property(TEST
   polybenchGPU_CORR
   polybenchGPU_CORR_cmd_buffer
   polybenchGPU_COVAR
@@ -220,6 +219,5 @@ set_tests_properties(
   polybenchGPU_GRAMSCHM_cmd_buffer
   polybenchGPU_2MM
   polybenchGPU_2MM_cmd_buffer
-  PROPERTIES
-  LABELS "long")
+  APPEND PROPERTY LABELS "long")
 

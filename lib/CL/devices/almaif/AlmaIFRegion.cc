@@ -24,6 +24,10 @@
 
 #include "AlmaIFRegion.hh"
 
+#include "pocl_util.h"
+
+#include <fstream>
+
 AlmaIFRegion::~AlmaIFRegion() {}
 
 bool AlmaIFRegion::isInRange(size_t dst) {
@@ -33,3 +37,51 @@ bool AlmaIFRegion::isInRange(size_t dst) {
 size_t AlmaIFRegion::PhysAddress() { return PhysAddress_; }
 
 size_t AlmaIFRegion::Size() { return Size_; }
+
+void AlmaIFRegion::Write32(size_t offset, uint32_t value) {
+  CopyToMMAP(PhysAddress() + offset, &value, 4);
+}
+
+uint32_t AlmaIFRegion::Read32(size_t offset) {
+  uint32_t value = 0;
+  CopyFromMMAP(&value, PhysAddress() + offset, 4);
+  return value;
+}
+
+void AlmaIFRegion::Write64(size_t offset, uint64_t value) {
+  Write32(offset, (uint32_t)value);
+  Write32(offset + 4, (uint32_t)(value >> 32));
+}
+
+uint64_t AlmaIFRegion::Read64(size_t offset) {
+  uint32_t low_bits = Read32(offset);
+  uint32_t high_bits = Read32(offset + 4);
+  uint64_t value = ((uint64_t)high_bits << 32) | low_bits;
+  return value;
+}
+
+void AlmaIFRegion::Write16(size_t offset, uint16_t value) {
+  uint32_t old_value = Read32(offset & 0xFFFFFFFC);
+  uint32_t new_value = 0;
+  if ((offset & 0b10) == 0) {
+    new_value = (old_value & 0xFFFF0000) | (uint32_t)value;
+  } else {
+    new_value = ((uint32_t)value << 16) | (old_value & 0xFFFF);
+  }
+  Write32(offset & 0xFFFFFFFC, new_value);
+}
+
+void AlmaIFRegion::initRegion(const std::string &init_file) {
+  std::ifstream inFile;
+  inFile.open(init_file.c_str(), std::ios::binary);
+  unsigned int current;
+  int i = 0;
+  while (inFile.good()) {
+    inFile.read(reinterpret_cast<char *>(&current), sizeof(current));
+    Write32(i, current);
+    i += 4;
+  }
+
+  POCL_MSG_PRINT_ALMAIF_MMAP("MMAP: Initialized region with %i bytes \n",
+                             i - 4);
+}

@@ -213,6 +213,7 @@ typedef struct
   int force_generic_wg_func;
   /* If set to 1, disallow "small grid" WG function specialization. */
   int force_large_grid_wg_func;
+  cl_mutable_dispatch_fields_khr updatable_fields;
 } _cl_command_run;
 
 /* For clEnqueueCommandBufferKHR(). */

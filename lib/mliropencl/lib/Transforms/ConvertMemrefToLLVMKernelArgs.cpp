@@ -26,13 +26,13 @@
 #include <mlir/Dialect/LLVMIR/LLVMAttrs.h>
 #include <mlir/Dialect/LLVMIR/LLVMDialect.h>
 #include <mlir/IR/BuiltinOps.h>
-#include <mlir/Pass/Pass.h>
 
 #include "pocl/Transforms/Passes.hh"
 
 #include "pocl_util.h"
 
 namespace {
+using mlir::pocl::ConvertMemrefToLLVMKernelArgsOptions;
 #define GEN_PASS_DEF_CONVERTMEMREFTOLLVMKERNELARGS
 #include "pocl/Transforms/Passes.h.inc"
 } // namespace
@@ -41,6 +41,7 @@ namespace {
 struct ConvertMemrefToLLVMKernelArgs
     : public impl::ConvertMemrefToLLVMKernelArgsBase<
           ConvertMemrefToLLVMKernelArgs> {
+  using ConvertMemrefToLLVMKernelArgsBase::ConvertMemrefToLLVMKernelArgsBase;
 
   void runOnOperation() override {
     mlir::ModuleOp Module = getOperation();
@@ -53,14 +54,19 @@ struct ConvertMemrefToLLVMKernelArgs
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(Context);
     auto I64Ty = mlir::IntegerType::get(Context, 64);
     auto I32Ty = mlir::IntegerType::get(Context, 32);
+    auto I8Ty = mlir::IntegerType::get(Context, 8);
     auto VoidTy = mlir::LLVM::LLVMVoidType::get(Context);
 
-    mlir::SmallVector<mlir::LLVM::LLVMFuncOp> FuncOps;
+    mlir::LLVM::LLVMFuncOp KernFunc = nullptr;
     Module->walk([&](mlir::LLVM::LLVMFuncOp FuncOp) {
       if (FuncOp->hasAttr(mlir::gpu::GPUDialect::getKernelFuncAttrName()))
-        FuncOps.push_back(FuncOp);
+        KernFunc = FuncOp;
     });
-    mlir::LLVM::LLVMFuncOp KernFunc = *FuncOps.begin();
+    if (!KernFunc) {
+      POCL_MSG_ERR("Couldn't find the kernel function in LLVM conversion\n");
+      signalPassFailure();
+      return;
+    }
 
     // Define function type: (i8*, i8*, i64, i64, i64) -> void
     mlir::SmallVector<mlir::Type> ArgTypes = {
@@ -103,12 +109,13 @@ struct ConvertMemrefToLLVMKernelArgs
     mlir::SmallVector<mlir::Value> KernArgs = {};
     mlir::Attribute Attr = KernFunc->getAttr("CL_arg_count");
     int64_t ClArgCount = 0;
-    if (auto IntegerAttr = mlir::dyn_cast<mlir::IntegerAttr>(Attr)) {
+    if (auto IntegerAttr = mlir::dyn_cast_if_present<mlir::IntegerAttr>(Attr)) {
       ClArgCount = IntegerAttr.getInt();
     } else {
       POCL_MSG_ERR(
           "Couldn't extract the CL_arg_count attribute from mlir bitcode\n");
       signalPassFailure();
+      return;
     }
 
     int MLIRArgIndex = 0;
@@ -120,16 +127,26 @@ struct ConvertMemrefToLLVMKernelArgs
             mlir::LLVM::ConstantOp::create(Builder, Loc, I64Ty, ZeroAttr);
         auto NullPtr = mlir::LLVM::ZeroOp::create(Builder, Loc, PtrTy);
 
-        mlir::Value V1 = mlir::LLVM::LoadOp::create(
-            Builder, Loc, PtrTy,
-            mlir::LLVM::GEPOp::create(Builder, Loc, PtrTy, PtrTy, Args,
-                                      mlir::ArrayRef<mlir::LLVM::GEPArg>{
-                                          mlir::LLVM::GEPArg(ClArgIndex)}));
-
-        mlir::Value V2 = mlir::LLVM::LoadOp::create(Builder, Loc, PtrTy, V1);
+        mlir::Value ArgVal;
+        if (hasArgBufferLauncher) {
+          ArgVal = mlir::LLVM::LoadOp::create(
+              Builder, Loc, PtrTy,
+              mlir::LLVM::GEPOp::create(
+                  Builder, Loc, PtrTy, I8Ty, Args,
+                  mlir::ArrayRef<mlir::LLVM::GEPArg>{
+                      mlir::LLVM::GEPArg(ClArgIndex * MAX_EXTENDED_ALIGNMENT)}),
+              MAX_EXTENDED_ALIGNMENT);
+        } else {
+          mlir::Value ArgPtr = mlir::LLVM::LoadOp::create(
+              Builder, Loc, PtrTy,
+              mlir::LLVM::GEPOp::create(Builder, Loc, PtrTy, PtrTy, Args,
+                                        mlir::ArrayRef<mlir::LLVM::GEPArg>{
+                                            mlir::LLVM::GEPArg(ClArgIndex)}));
+          ArgVal = mlir::LLVM::LoadOp::create(Builder, Loc, PtrTy, ArgPtr);
+        }
 
         KernArgs.push_back(NullPtr);
-        KernArgs.push_back(V2);
+        KernArgs.push_back(ArgVal);
         KernArgs.push_back(IntZero); // offset
         KernArgs.push_back(IntZero); // size
         KernArgs.push_back(IntZero); // stride
@@ -137,52 +154,69 @@ struct ConvertMemrefToLLVMKernelArgs
         MLIRArgIndex += 5;
       } else {
         auto ArgType = Arg.getType();
-        mlir::Value V1 = mlir::LLVM::LoadOp::create(
-            Builder, Loc, PtrTy,
-            mlir::LLVM::GEPOp::create(Builder, Loc, PtrTy, PtrTy, Args,
-                                      mlir::ArrayRef<mlir::LLVM::GEPArg>{
-                                          mlir::LLVM::GEPArg(ClArgIndex)}));
-        mlir::Value V2 = mlir::LLVM::LoadOp::create(Builder, Loc, ArgType, V1);
-        KernArgs.push_back(V2);
+        mlir::Value ArgVal;
+        if (hasArgBufferLauncher) {
+          ArgVal = mlir::LLVM::LoadOp::create(
+              Builder, Loc, ArgType,
+              mlir::LLVM::GEPOp::create(
+                  Builder, Loc, PtrTy, I8Ty, Args,
+                  mlir::ArrayRef<mlir::LLVM::GEPArg>{
+                      mlir::LLVM::GEPArg(ClArgIndex * MAX_EXTENDED_ALIGNMENT)}),
+              MAX_EXTENDED_ALIGNMENT);
+        } else {
+          mlir::Value ArgPtr = mlir::LLVM::LoadOp::create(
+              Builder, Loc, PtrTy,
+              mlir::LLVM::GEPOp::create(Builder, Loc, PtrTy, PtrTy, Args,
+                                        mlir::ArrayRef<mlir::LLVM::GEPArg>{
+                                            mlir::LLVM::GEPArg(ClArgIndex)}));
+          ArgVal = mlir::LLVM::LoadOp::create(Builder, Loc, ArgType, ArgPtr);
+        }
+        KernArgs.push_back(ArgVal);
 
         MLIRArgIndex++;
       }
     }
 
-    int PcArgCount = PoclContextTy.getBody().size();
-    int PcArgIndex = 0;
-    for (; PcArgIndex < 3; PcArgIndex++) {
-      auto ArrayGepOp = mlir::LLVM::GEPOp::create(
-          Builder, Loc, PtrTy, PoclContextTy, ContextArg,
-          mlir::ArrayRef<mlir::LLVM::GEPArg>{0, mlir::LLVM::GEPArg(PcArgIndex)},
-          mlir::LLVM::GEPNoWrapFlags::inbounds);
-      for (int TmpArrayIdx = 0; TmpArrayIdx < 3; TmpArrayIdx++) {
-        auto GepOp = mlir::LLVM::GEPOp::create(
-            Builder, Loc, PtrTy, Array3xI64Ty, ArrayGepOp,
+    bool isCommandBuffer = KernFunc->hasAttr("CL_command_buffer");
+    if (!isCommandBuffer) {
+      int PcArgCount = PoclContextTy.getBody().size();
+      int PcArgIndex = 0;
+      for (; PcArgIndex < 3; PcArgIndex++) {
+        auto ArrayGepOp = mlir::LLVM::GEPOp::create(
+            Builder, Loc, PtrTy, PoclContextTy, ContextArg,
             mlir::ArrayRef<mlir::LLVM::GEPArg>{0,
-                                               mlir::LLVM::GEPArg(TmpArrayIdx)},
+                                               mlir::LLVM::GEPArg(PcArgIndex)},
+            mlir::LLVM::GEPNoWrapFlags::inbounds);
+        for (int TmpArrayIdx = 0; TmpArrayIdx < 3; TmpArrayIdx++) {
+          auto GepOp = mlir::LLVM::GEPOp::create(
+              Builder, Loc, PtrTy, Array3xI64Ty, ArrayGepOp,
+              mlir::ArrayRef<mlir::LLVM::GEPArg>{
+                  0, mlir::LLVM::GEPArg(TmpArrayIdx)},
+              mlir::LLVM::GEPNoWrapFlags::inbounds);
+          auto ArgType = KernFunc.getArgumentTypes()[MLIRArgIndex];
+          mlir::Value ArgPtr =
+              mlir::LLVM::LoadOp::create(Builder, Loc, ArgType, GepOp);
+          KernArgs.push_back(ArgPtr);
+          MLIRArgIndex++;
+        }
+      }
+      for (; PcArgIndex < PcArgCount; PcArgIndex++) {
+        auto GepOp = mlir::LLVM::GEPOp::create(
+            Builder, Loc, PtrTy, PoclContextTy, ContextArg,
+            mlir::ArrayRef<mlir::LLVM::GEPArg>{0,
+                                               mlir::LLVM::GEPArg(PcArgIndex)},
             mlir::LLVM::GEPNoWrapFlags::inbounds);
         auto ArgType = KernFunc.getArgumentTypes()[MLIRArgIndex];
-        mlir::Value V1 =
+        mlir::Value ArgPtr =
             mlir::LLVM::LoadOp::create(Builder, Loc, ArgType, GepOp);
-        KernArgs.push_back(V1);
+        KernArgs.push_back(ArgPtr);
         MLIRArgIndex++;
       }
-    }
-    for (; PcArgIndex < PcArgCount; PcArgIndex++) {
-      auto GepOp = mlir::LLVM::GEPOp::create(
-          Builder, Loc, PtrTy, PoclContextTy, ContextArg,
-          mlir::ArrayRef<mlir::LLVM::GEPArg>{0, mlir::LLVM::GEPArg(PcArgIndex)},
-          mlir::LLVM::GEPNoWrapFlags::inbounds);
-      auto ArgType = KernFunc.getArgumentTypes()[MLIRArgIndex];
-      mlir::Value V1 = mlir::LLVM::LoadOp::create(Builder, Loc, ArgType, GepOp);
-      KernArgs.push_back(V1);
-      MLIRArgIndex++;
-    }
 
-    KernArgs.push_back(GidX);
-    KernArgs.push_back(GidY);
-    KernArgs.push_back(GidZ);
+      KernArgs.push_back(GidX);
+      KernArgs.push_back(GidY);
+      KernArgs.push_back(GidZ);
+    }
 
     mlir::LLVM::CallOp::create(Builder, Loc, KernFunc, KernArgs);
     mlir::LLVM::ReturnOp::create(Builder, Loc, mlir::ValueRange{});
@@ -193,4 +227,9 @@ struct ConvertMemrefToLLVMKernelArgs
 std::unique_ptr<mlir::Pass>
 mlir::pocl::createConvertMemrefToLLVMKernelArgsPass() {
   return std::make_unique<ConvertMemrefToLLVMKernelArgs>();
+}
+
+std::unique_ptr<mlir::Pass> mlir::pocl::createConvertMemrefToLLVMKernelArgsPass(
+    ConvertMemrefToLLVMKernelArgsOptions options) {
+  return std::make_unique<ConvertMemrefToLLVMKernelArgs>(options);
 }

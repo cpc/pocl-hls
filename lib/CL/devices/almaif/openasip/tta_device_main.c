@@ -60,7 +60,7 @@ tta_opencl_wg_launch (__cq__ volatile struct AQLDispatchPacket *packet)
 
   const int work_dim = packet->dimensions;
   struct pocl_context32 __global__ *context
-      = (struct pocl_context32 __global__ *)(packet->reserved1);
+    = (struct pocl_context32 __global__ *)(packet->pocl_context32b_low);
 
   const int num_groups_x = context->num_groups[0];
   const int num_groups_y = (work_dim >= 2) ? (context->num_groups[1]) : 1;

@@ -675,7 +675,7 @@ void pocl_almaif_openasip_produce_standalone_program(AlmaifData *D,
       << "\tstandalone_packet.workgroup_size_z = " << std::hex << "(uint32_t)0x"
       << run_cmd->pc.local_size[2] << ";\n"
 
-      << "\tstandalone_packet.reserved1 = (uint32_t)ctx_buffer"
+      << "\tstandalone_packet.pocl_context32b_low = (uint32_t)ctx_buffer"
       << ";\n"
       << "\tstandalone_packet.kernarg_address_low = (uint32_t)arg_buffer"
       << ";\n"

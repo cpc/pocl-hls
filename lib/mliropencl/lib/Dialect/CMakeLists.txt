@@ -25,6 +25,7 @@
 
 add_mlir_dialect_library(PoclDialect OBJECT
                         PoclDialect.cpp
+			"PolygeistOps.cpp"
                         DEPENDS
                         MLIRPoclOpsIncGen
                         )

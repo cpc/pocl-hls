@@ -35,6 +35,11 @@ set(MLIRPASSES_SOURCES "Workgroup.cpp"
 			"ConvertMemrefToLLVMKernelArgs.cpp"
 			"LowerOpenCLBuiltins.cpp"
 			"StripMemSpaces.cpp"
+			"Mem2Reg.cpp"
+			"DistributeBarriers.cpp"
+			"AffineCFG.cpp"
+			"SimplifyAffineExprs.cpp"
+			"DetectReduction.cpp"
 			)
 
 pocl_build_clang_llvm_object(mlirpasses ${MLIRPASSES_SOURCES})

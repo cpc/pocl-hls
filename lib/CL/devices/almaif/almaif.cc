@@ -23,10 +23,16 @@
    IN THE SOFTWARE.
 */
 
+#include "config.h"
+
 #include "almaif.h"
 #include "AlmaIFRegion.hh"
 #include "MMAPDevice.hh"
-#include "config.h"
+
+#define HAVE_OPAE
+#ifdef HAVE_OPAE
+#include "altera/AlteraOpaeDevice.hh"
+#endif
 
 #ifdef HAVE_XRT
 #include "XilinxXrtDevice.hh"
@@ -86,10 +92,6 @@ void *runningThreadFunc(void *);
 _cl_command_node *runningList;
 bool runningJoinRequested = false;
 
-struct almaif_event_data_t {
-  pthread_cond_t event_cond;
-  chunk_info_t *chunk;
-};
 
 void pocl_almaif_init_device_ops(struct pocl_device_ops *ops) {
 
@@ -128,7 +130,7 @@ void pocl_almaif_init_device_ops(struct pocl_device_ops *ops) {
   ops->free_queue = pocl_almaif_free_queue;
 
   ops->build_builtin = pocl_almaif_build_builtin;
-  ops->free_program = pocl_driver_free_program;
+  ops->free_program = pocl_almaif_free_program;
 
   ops->copy_rect = pocl_almaif_copy_rect;
   ops->read_rect = pocl_almaif_read_rect;
@@ -140,6 +142,11 @@ void pocl_almaif_init_device_ops(struct pocl_device_ops *ops) {
 // AlmaIF's driver by default has nothing to build for BiKs.
 int pocl_almaif_build_builtin(cl_program program POCL_UNUSED,
                               cl_uint device_i POCL_UNUSED) {
+  return CL_SUCCESS;
+}
+
+int pocl_almaif_free_program(cl_device_id device, cl_program program,
+                             unsigned program_device_i) {
   return CL_SUCCESS;
 }
 
@@ -276,7 +283,10 @@ cl_int pocl_almaif_init(unsigned j, cl_device_id dev, const char *parameters) {
   dev->short_name = "almaif";
   dev->vendor = "pocl";
   dev->version = "1.2";
-  dev->extensions = "";
+  dev->extensions = "cl_khr_command_buffer_multi_device "
+                    "cl_khr_command_buffer_mutable_dispatch";
+  dev->cmdbuf_mutable_dispatch_capabilities =
+      CL_MUTABLE_DISPATCH_ARGUMENTS_KHR | CL_MUTABLE_DISPATCH_GLOBAL_SIZE_KHR;
   dev->profile = "FULL_PROFILE";
 
   dev->profiling_timer_resolution = 1000;
@@ -307,10 +317,11 @@ cl_int pocl_almaif_init(unsigned j, cl_device_id dev, const char *parameters) {
   // Either way, the minimum is 3 for a device
   dev->max_work_item_dimensions = 3;
   dev->max_work_group_size = dev->max_work_item_sizes[0] =
-      dev->max_work_item_sizes[1] = dev->max_work_item_sizes[2] = 1024;
+      dev->max_work_item_sizes[1] = dev->max_work_item_sizes[2] = 65535;
   dev->max_work_item_sizes[0] = dev->max_work_item_sizes[1] =
-      dev->max_work_item_sizes[2] = dev->max_work_group_size = 64;
+      dev->max_work_item_sizes[2] = dev->max_work_group_size = 65535;
   dev->preferred_wg_size_multiple = 8;
+  dev->grid_width_specialization_limit = USHRT_MAX;
 
   AlmaifData *D = new AlmaifData;
   D->Available = CL_TRUE;
@@ -364,6 +375,13 @@ cl_int pocl_almaif_init(unsigned j, cl_device_id dev, const char *parameters) {
       POCL_ABORT(
           "Almaif: tried enabling XilinxXrtDevice but it's not available\n");
 #endif
+    } else if (D->BaseAddress == POCL_ALMAIFDEVICE_OPAE) {
+#ifdef HAVE_OPAE
+      D->Dev = new AlteraOpaeDevice(device_init_file, j);
+#else
+      POCL_ABORT(
+          "Almaif: tried enabling AlteraOpaeDevice but it's not available\n");
+#endif
     } else if (D->BaseAddress == POCL_ALMAIFDEVICE_TTASIM) {
 #ifdef TCE_AVAILABLE
       D->Dev = new TTASimDevice(device_init_file);
@@ -397,12 +415,36 @@ cl_int pocl_almaif_init(unsigned j, cl_device_id dev, const char *parameters) {
         D->Dev->ExternalMemory->Size() > D->Dev->DataMemory->Size())
       dev->global_mem_size = D->Dev->ExternalMemory->Size();
 
+    if (D->Dev->pipeCount() > 0) {
+      dev->pipe_support = CL_TRUE;
+      dev->max_pipe_args = ALMAIF_MAX_PIPE_COUNT;
+      dev->max_pipe_active_res = 1;
+      dev->max_pipe_packet_size = 512;
+    }
+    dev->device_side_printf = 1;
+    dev->printf_buffer_size = PRINTF_BUFFER_SIZE / 4;
+    chunk_info_t *chunk = NULL;
+    chunk = pocl_alloc_buffer(D->Dev->AllocRegions, dev->printf_buffer_size);
+    if (chunk == NULL) {
+      POCL_MSG_WARN("Almaif: Can't allocate %lu bytes for printf buffer\n",
+                    dev->printf_buffer_size);
+      dev->device_side_printf = 0;
+    } else {
+      POCL_MSG_PRINT_ALMAIF("Allocated printf buffer of size %lu from %lu\n",
+                            dev->printf_buffer_size, chunk->start_address);
+      D->PrintfBuffer = chunk;
+
+      D->PrintfPosition = pocl_alloc_buffer(D->Dev->AllocRegions, 4);
+      if (D->PrintfPosition == NULL) {
+        POCL_ABORT("Almaif: Can't allocate 4 bytes for printf index\n");
+      }
+    }
   } else {
     POCL_MSG_PRINT_ALMAIF(
         "Starting offline compilation device initialization\n");
   }
 
-  if (D->Dev->isDBDevice()) {
+  if (!pocl_offline_compile && D->Dev->isDBDevice()) {
 #ifdef HAVE_DBDEVICE
     std::vector<cl_dbk_id_exp> bik_list =
         ((DBDevice *)(D->Dev))->supportedBuiltinKernels();
@@ -461,13 +503,6 @@ cl_int pocl_almaif_init(unsigned j, cl_device_id dev, const char *parameters) {
 
   free(scanParams);
 
-  if (D->Dev->pipeCount() > 0) {
-    dev->pipe_support = CL_TRUE;
-    dev->max_pipe_args = ALMAIF_MAX_PIPE_COUNT;
-    dev->max_pipe_active_res = 1;
-    dev->max_pipe_packet_size = 512;
-  }
-
   if (enable_compilation) {
 
     dev->compiler_available = CL_TRUE;
@@ -481,24 +516,6 @@ cl_int pocl_almaif_init(unsigned j, cl_device_id dev, const char *parameters) {
     dev->linker_available = CL_FALSE;
   }
 
-  dev->device_side_printf = 1;
-  dev->printf_buffer_size = PRINTF_BUFFER_SIZE / 4;
-  chunk_info_t *chunk = NULL;
-  chunk = pocl_alloc_buffer(D->Dev->AllocRegions, dev->printf_buffer_size);
-  if (chunk == NULL) {
-    POCL_MSG_WARN("Almaif: Can't allocate %lu bytes for printf buffer\n",
-                  dev->printf_buffer_size);
-    dev->device_side_printf = 0;
-  } else {
-    POCL_MSG_PRINT_ALMAIF("Allocated printf buffer of size %lu from %lu\n",
-                          dev->printf_buffer_size, chunk->start_address);
-    D->PrintfBuffer = chunk;
-
-    D->PrintfPosition = pocl_alloc_buffer(D->Dev->AllocRegions, 4);
-    if (D->PrintfPosition == NULL) {
-      POCL_ABORT("Almaif: Can't allocate 4 bytes for printf index\n");
-    }
-  }
 
   POCL_MSG_PRINT_ALMAIF("almaif: mmap done\n");
   if (pocl_offline_compile) {
@@ -511,24 +528,32 @@ cl_int pocl_almaif_init(unsigned j, cl_device_id dev, const char *parameters) {
   for (unsigned i = 0; i < (D->Dev->CQMemory->Size() >> 2); i++) {
     //    D->Dev->CQMemory->Write32(4 * i, 0);
   }
-  // Initialize AQL queue by setting all headers to invalid
-  POCL_MSG_PRINT_ALMAIF("Initializing AQL Packet cqmemory size=%zu\n",
-                        D->Dev->CQMemory->Size());
-  for (uint32_t i = AQL_PACKET_LENGTH; i < D->Dev->CQMemory->Size();
-       i += AQL_PACKET_LENGTH) {
-    D->Dev->CQMemory->Write16(i, AQL_PACKET_INVALID);
-  }
-  D->Dev->CQMemory->Write32(ALMAIF_CQ_WRITE, 0);
-  D->Dev->CQMemory->Write32(ALMAIF_CQ_READ, 0);
+  // Initialize AQL queue by setting all headers to invalid.
+  // Skipped when no bitstream is loaded yet (deferred bitstream load); the same
+  // initialization is performed in loadProgramToDevice() after programming.
+  if (D->Dev->isHardwareReady()) {
+    POCL_MSG_PRINT_ALMAIF("Initializing AQL Packet cqmemory size=%zu\n",
+                          D->Dev->CQMemory->Size());
+    for (uint32_t i = AQL_PACKET_LENGTH; i < D->Dev->CQMemory->Size();
+         i += AQL_PACKET_LENGTH) {
+      D->Dev->CQMemory->Write16(i, AQL_PACKET_INVALID);
+    }
+    D->Dev->CQMemory->Write32(ALMAIF_CQ_WRITE, 0);
+    D->Dev->CQMemory->Write32(ALMAIF_CQ_READ, 0);
 
 #ifdef ALMAIF_DUMP_MEMORY
-  POCL_MSG_PRINT_ALMAIF("INIT MEMORY DUMP\n");
-  D->Dev->printMemoryDump();
+    POCL_MSG_PRINT_ALMAIF("INIT MEMORY DUMP\n");
+    D->Dev->printMemoryDump();
 #endif
 
-  // Lift accelerator reset
-  D->Dev->ControlMemory->Write32(ALMAIF_CONTROL_REG_COMMAND, ALMAIF_CONTINUE_CMD);
-  D->Dev->HwClockStart = pocl_gettimemono_ns();
+    // Lift accelerator reset
+    D->Dev->ControlMemory->Write32(ALMAIF_CONTROL_REG_COMMAND,
+                                   ALMAIF_CONTINUE_CMD);
+    D->Dev->HwClockStart = pocl_gettimemono_ns();
+  } else {
+    POCL_MSG_PRINT_ALMAIF(
+        "Almaif: Skipping AQL queue init; no bitstream loaded yet.\n");
+  }
 
   D->ReadyList = NULL;
   D->CommandList = NULL;
@@ -605,7 +630,7 @@ void pocl_almaif_update_event(cl_device_id device, cl_event event) {
 
     if (event->status <= CL_COMPLETE) {
       assert(ed);
-      size_t commandMetaAddress = ed->chunk->start_address;
+      size_t commandMetaAddress = ed->cmd_meta->start_address;
       assert(commandMetaAddress);
       commandMetaAddress -= D->Dev->DataMemory->PhysAddress();
 
@@ -846,224 +871,14 @@ void pocl_almaif_notify(cl_device_id Device, cl_event Event, cl_event Finished) 
   }
 }
 
-void scheduleNDRange(AlmaifData *data, _cl_command_node *cmd, size_t arg_size,
-                     void *arguments) {
-  _cl_command_run *run = &cmd->command.run;
-  cl_kernel k = run->kernel;
-  cl_program p = k->program;
-  cl_event e = cmd->sync.event.event;
-  almaif_event_data_t *event_data = (almaif_event_data_t *)e->data;
-  int32_t kernelID = -1;
-  bool SanitizeKernelName = false;
-
-  for (auto supportedKernel : data->SupportedKernels) {
-    if (strcmp(supportedKernel->name, k->name) == 0) {
-      kernelID = (int32_t)supportedKernel->builtin_kernel_id;
-      /* builtin kernels that come from tce_kernels.cl need compiling */
-      if (p->num_builtin_kernels > 0 && p->source) {
-        POCL_MSG_PRINT_ALMAIF(
-            "almaif: builtin kernel with source, needs compiling\n");
-        kernelID = -1;
-        SanitizeKernelName = true;
-      }
-      break;
-    }
-  }
-#ifdef HAVE_DBDEVICE
-  if (data->Dev->isDBDevice()) {
-    ((DBDevice *)(data->Dev))
-        ->programBIKernelBitstream((cl_dbk_id_exp)kernelID);
-    ((DBDevice *)(data->Dev))
-        ->programBIKernelFirmware((cl_dbk_id_exp)kernelID);
-  }
-#endif
-
-  if (kernelID == -1) {
-    if (data->compilationData == NULL) {
-      POCL_ABORT("almaif: scheduled an NDRange with unsupported kernel\n");
-    } else {
-      POCL_MSG_PRINT_ALMAIF("almaif: compiling kernel\n");
-      char *SavedName = nullptr;
-      if (SanitizeKernelName)
-        pocl_sanitize_builtin_kernel_name(k, &SavedName);
-
-      pocl_almaif_compile_kernel(cmd, k, cmd->device, 1);
-
-      if (SanitizeKernelName)
-        pocl_restore_builtin_kernel_name(k, SavedName);
-    }
-  }
-
-  // Additional space for a signal
-  size_t extraAlloc = sizeof(struct CommandMetadata);
-  chunk_info_t *chunk = pocl_alloc_buffer_from_region(data->Dev->AllocRegions,
-                                                      arg_size + extraAlloc);
-  assert(chunk && "Failed to allocate signal/argument buffer");
-
-  POCL_MSG_PRINT_ALMAIF("almaif: allocated 0x%zx bytes for signal/arguments "
-                       "from 0x%zx\n",
-                       arg_size + extraAlloc, chunk->start_address);
-  assert(event_data);
-  assert(event_data->chunk == NULL);
-  event_data->chunk = chunk;
-
-  size_t commandMetaAddress = chunk->start_address;
-  size_t signalAddress =
-      commandMetaAddress + offsetof(CommandMetadata, completion_signal);
-  size_t argsAddress = chunk->start_address + sizeof(struct CommandMetadata);
-  POCL_MSG_PRINT_ALMAIF("Signal address=0x%zx\n", signalAddress);
-  // clear the timestamps and initial signal value
-  for (unsigned offset = 0; offset < sizeof(CommandMetadata); offset += 4)
-    data->Dev->DataMemory->Write32(
-        commandMetaAddress - data->Dev->DataMemory->PhysAddress() + offset, 0);
-  if (cmd->device->device_side_printf) {
-    data->Dev->DataMemory->Write32(
-        commandMetaAddress - data->Dev->DataMemory->PhysAddress() +
-            offsetof(CommandMetadata, reserved0),
-        ((chunk_info_t *)data->PrintfBuffer)->start_address);
-    data->Dev->DataMemory->Write32(commandMetaAddress -
-                                       data->Dev->DataMemory->PhysAddress() +
-                                       offsetof(CommandMetadata, reserved1),
-                                   cmd->device->printf_buffer_size);
-
-    data->Dev->DataMemory->Write32(
-        commandMetaAddress - data->Dev->DataMemory->PhysAddress() +
-            offsetof(CommandMetadata, reserved1) + 4,
-        ((chunk_info_t *)data->PrintfPosition)->start_address);
-  }
-
-  // Set arguments
-  data->Dev->DataMemory->CopyToMMAP(argsAddress, arguments, arg_size);
-
-  struct AQLDispatchPacket packet = {};
-
-  packet.header = AQL_PACKET_INVALID;
-  packet.dimensions = run->pc.work_dim; // number of dimensions
-
-  packet.workgroup_size_x = run->pc.local_size[0];
-  packet.workgroup_size_y = run->pc.local_size[1];
-  packet.workgroup_size_z = run->pc.local_size[2];
-
-  pocl_context32 pc;
-
-  if (kernelID != -1) {
-    packet.grid_size_x = run->pc.local_size[0] * run->pc.num_groups[0];
-    packet.grid_size_y = run->pc.local_size[1] * run->pc.num_groups[1];
-    packet.grid_size_z = run->pc.local_size[2] * run->pc.num_groups[2];
-    packet.kernel_object = kernelID;
-  } else {
-
-    // Compilation needs pocl_context struct, create it, copy it to device and
-    // pass the pointer to it in the 'reserved' slot of AQL kernel dispatch
-    // packet.
-    pc.work_dim = run->pc.work_dim;
-    pc.local_size[0] = run->pc.local_size[0];
-    pc.local_size[1] = run->pc.local_size[1];
-    pc.local_size[2] = run->pc.local_size[2];
-    pc.num_groups[0] = run->pc.num_groups[0];
-    pc.num_groups[1] = run->pc.num_groups[1];
-    pc.num_groups[2] = run->pc.num_groups[2];
-    pc.global_offset[0] = run->pc.global_offset[0];
-    pc.global_offset[1] = run->pc.global_offset[1];
-    pc.global_offset[2] = run->pc.global_offset[2];
-    pc.global_var_buffer = 0;
-
-    if (cmd->device->device_side_printf) {
-      pc.printf_buffer = ((chunk_info_t *)data->PrintfBuffer)->start_address;
-      pc.printf_buffer_capacity = cmd->device->printf_buffer_size;
-      assert(pc.printf_buffer_capacity);
-
-      pc.printf_buffer_position =
-          ((chunk_info_t *)data->PrintfPosition)->start_address;
-      POCL_MSG_PRINT_ALMAIF(
-          "Device side printf buffer=%d, position: %d and capacity %d \n",
-          pc.printf_buffer, pc.printf_buffer_position,
-          pc.printf_buffer_capacity);
-
-      data->Dev->DataMemory->Write32(
-          pc.printf_buffer_position - data->Dev->DataMemory->PhysAddress(), 0);
-    }
-
-    size_t pc_start_addr = data->compilationData->pocl_context->start_address;
-    data->Dev->DataMemory->CopyToMMAP(pc_start_addr, &pc,
-                                      sizeof(pocl_context32));
-
-    if (data->Dev->RelativeAddressing) {
-      pc_start_addr -= data->Dev->DataMemory->PhysAddress();
-    }
-
-    packet.reserved = pc_start_addr;
-
-    almaif_kernel_data_t *kd =
-        (almaif_kernel_data_t *)run->kernel->data[cmd->program_device_i];
-    packet.kernel_object = kd->kernel_address;
-
-    POCL_MSG_PRINT_ALMAIF("Kernel addresss=0x%" PRIu32 "\n", kd->kernel_address);
-  }
-
-  if (data->Dev->RelativeAddressing) {
-    packet.kernarg_address = argsAddress - data->Dev->DataMemory->PhysAddress();
-    packet.command_meta_address =
-        commandMetaAddress - data->Dev->DataMemory->PhysAddress();
-  } else {
-    packet.kernarg_address = argsAddress;
-    packet.command_meta_address = commandMetaAddress;
-  }
-
-  POCL_MSG_PRINT_ALMAIF("ArgsAddress=0x%" PRIx64 " CommandMetaAddress=0x%" PRIx64
-                       " \n",
-                       packet.kernarg_address, packet.command_meta_address);
-
-  POCL_LOCK(data->AQLQueueLock);
-  uint32_t queue_length = data->Dev->CQMemory->Size() / AQL_PACKET_LENGTH - 1;
-
-  uint32_t write_iter = data->Dev->CQMemory->Read32(ALMAIF_CQ_WRITE);
-  uint32_t read_iter = data->Dev->CQMemory->Read32(ALMAIF_CQ_READ);
-  while (write_iter >= read_iter + queue_length) {
-    POCL_MSG_PRINT_ALMAIF("write_iter=%u, read_iter=%u length=%u", write_iter,
-                          read_iter, queue_length);
-    usleep(ALMAIF_DRIVER_SLEEP);
-    read_iter = data->Dev->CQMemory->Read32(ALMAIF_CQ_READ);
-#ifdef ALMAIF_DUMP_MEMORY
-    POCL_MSG_PRINT_ALMAIF("WAITING FOR CQMEMORY TO EMPTY DUMP\n");
-    data->Dev->printMemoryDump();
-#endif
-  }
-  uint32_t packet_loc =
-      (write_iter % queue_length) * AQL_PACKET_LENGTH + AQL_PACKET_LENGTH;
-  data->Dev->CQMemory->CopyToMMAP(
-      packet_loc + data->Dev->CQMemory->PhysAddress(), &packet, 64);
-
-#ifdef ALMAIF_DUMP_MEMORY
-  POCL_MSG_PRINT_ALMAIF("PRELAUNCH MEMORY DUMP\n");
-  data->Dev->printMemoryDump();
-#endif
-
-  // finally, set header as not-invalid
-  data->Dev->CQMemory->Write16(packet_loc, (1 << AQL_PACKET_KERNEL_DISPATCH) |
-                                               AQL_PACKET_BARRIER);
-
-  POCL_MSG_PRINT_ALMAIF(
-      "almaif: Handed off a packet for execution, write iter=%u\n", write_iter);
-  // Increment queue index
-  data->Dev->CQMemory->Write32(ALMAIF_CQ_WRITE, write_iter + 1);
-
-  POCL_UNLOCK(data->AQLQueueLock);
-
-  if (kernelID == -1 && data->compilationData &&
-      data->compilationData->produce_standalone_program) {
-    data->compilationData->produce_standalone_program(data, cmd, &pc, arg_size,
-                                                      arguments);
-  }
-}
 
 bool isEventDone(AlmaifData *data, cl_event event) {
 
   almaif_event_data_t *ed = (almaif_event_data_t *)event->data;
-  if (ed->chunk->start_address == 0)
+  if (ed->cmd_meta->start_address == 0)
     return false;
 
-  size_t commandMetaAddress = ed->chunk->start_address;
+  size_t commandMetaAddress = ed->cmd_meta->start_address;
   assert(commandMetaAddress);
   size_t signalAddress =
       commandMetaAddress + offsetof(CommandMetadata, completion_signal);
@@ -1073,8 +888,8 @@ bool isEventDone(AlmaifData *data, cl_event event) {
 
   if (status == 1) {
     POCL_MSG_PRINT_ALMAIF("Event %" PRIu64
-                         " done, completion signal address=%zx, value=%u\n",
-                         event->id, signalAddress, status);
+                          " done, completion signal address=%zx, value=%u\n",
+                          event->id, signalAddress, status);
   }
 
   return (status == 1);
@@ -1107,9 +922,22 @@ void pocl_almaif_notify_event_finished(cl_event event) {
    * the "pocl_almaif_free_event_data" is not called, and because
    * almaif allocates memory from device globalmem for signals,
    * the device eventually runs out of memory. */
-  if (event->command_type == CL_COMMAND_NDRANGE_KERNEL && ed->chunk != NULL) {
-    pocl_free_chunk((chunk_info_t *)ed->chunk);
-    ed->chunk = NULL;
+  if (event->command_type == CL_COMMAND_NDRANGE_KERNEL) {
+    if (ed->cmd_meta != NULL) {
+      pocl_free_chunk((chunk_info_t *)ed->cmd_meta);
+      ed->cmd_meta = NULL;
+    }
+    if (ed->pocl_context != NULL) {
+      pocl_free_chunk((chunk_info_t *)ed->pocl_context);
+      ed->pocl_context = NULL;
+    }
+    if (ed->num_allocad_locals) {
+      for (int i = 0; i < ed->num_allocad_locals; i++) {
+        pocl_free_chunk(ed->allocad_locals[i]);
+      }
+      free(ed->allocad_locals);
+      ed->num_allocad_locals = 0;
+    }
   }
 }
 
@@ -1146,8 +974,8 @@ void submit_and_barrier(AlmaifData *D, _cl_command_node *cmd) {
     for (i = 0; i < AQL_MAX_SIGNAL_COUNT; i++) {
       almaif_event_data_t *dep_ed = (almaif_event_data_t *)dep_event->event->data;
       assert(dep_ed);
-      if (dep_ed->chunk) {
-        packet.dep_signals[i] = dep_ed->chunk->start_address;
+      if (dep_ed->cmd_meta) {
+        packet.dep_signals[i] = dep_ed->cmd_meta->start_address;
         POCL_MSG_PRINT_ALMAIF(
             "Creating AND barrier depending on signal id=%" PRIu64
             " at address %" PRIu64 " \n",
@@ -1189,9 +1017,6 @@ void submit_and_barrier(AlmaifData *D, _cl_command_node *cmd) {
   }
 }
 
-void pocl_almaif_run(void *data POCL_UNUSED,
-                     _cl_command_node *cmd POCL_UNUSED) {}
-
 #define CHECK_AND_ALIGN_ARGBUFFER(DSIZE)                                       \
   do {                                                                         \
     if (write_pos + (DSIZE) > last_pos)                                        \
@@ -1202,50 +1027,109 @@ void pocl_almaif_run(void *data POCL_UNUSED,
       write_pos += (AlignTarget - T);                                          \
   } while (0)
 
-void submit_kernel_packet(AlmaifData *D, _cl_command_node *cmd) {
-  struct pocl_argument *al;
-  unsigned i;
-  cl_kernel kernel = cmd->command.run.kernel;
-  pocl_kernel_metadata_t *meta = kernel->meta;
+void pocl_almaif_run(void *data POCL_UNUSED,
+                     _cl_command_node *cmd POCL_UNUSED) {}
+
+void submit_kernel_packet(AlmaifData *data, _cl_command_node *cmd) {
   struct pocl_context *pc = &cmd->command.run.pc;
 
   if (pc->num_groups[0] == 0 || pc->num_groups[1] == 0 || pc->num_groups[2] == 0)
     return;
 
-  // First pass to figure out total argument size
+  _cl_command_run *run = &cmd->command.run;
+  cl_kernel k = run->kernel;
+  cl_program p = k->program;
+  cl_event e = cmd->sync.event.event;
+  almaif_event_data_t *event_data = (almaif_event_data_t *)e->data;
+  int32_t kernelID = -1;
+  bool SanitizeKernelName = false;
+
+  for (auto supportedKernel : data->SupportedKernels) {
+    if (1) {
+      kernelID = (int32_t)supportedKernel->builtin_kernel_id;
+      /* builtin kernels that come from tce_kernels.cl need compiling */
+      if (p->num_builtin_kernels > 0 && p->source) {
+        POCL_MSG_PRINT_ALMAIF(
+            "almaif: builtin kernel with source, needs compiling\n");
+        kernelID = -1;
+        SanitizeKernelName = true;
+      }
+      break;
+    }
+  }
+#ifdef HAVE_DBDEVICE
+  if (data->Dev->isDBDevice()) {
+    ((DBDevice *)(data->Dev))
+        ->programBIKernelBitstream((cl_dbk_id_exp)kernelID);
+    ((DBDevice *)(data->Dev))->programBIKernelFirmware((cl_dbk_id_exp)kernelID);
+  }
+#endif
+
+  if (kernelID == -1) {
+    if (data->compilationData == NULL) {
+      POCL_ABORT("almaif: scheduled an NDRange with unsupported kernel\n");
+    } else {
+      POCL_MSG_PRINT_ALMAIF("almaif: compiling kernel\n");
+      char *SavedName = nullptr;
+      if (SanitizeKernelName)
+        pocl_sanitize_builtin_kernel_name(k, &SavedName);
+
+      pocl_almaif_compile_kernel(cmd, k, cmd->device, 1);
+
+      if (SanitizeKernelName)
+        pocl_restore_builtin_kernel_name(k, SavedName);
+    }
+  }
+
+  pocl_kernel_metadata_t *meta = k->meta;
+  event_data->num_allocad_locals = 0;
   size_t arg_size = meta->num_args * MAX_EXTENDED_ALIGNMENT;
   char *arguments =
       (char *)pocl_aligned_malloc(MAX_EXTENDED_ALIGNMENT, arg_size);
   char *write_pos = arguments;
   char *last_pos = arguments + arg_size;
-  /* TODO: Refactor this to a helper function (the argbuffer ABI). */
-  /* Process the kernel arguments. Convert the opaque buffer
-     pointers to real device pointers, allocate dynamic local
-     memory buffers, etc. */
+  int allocad_locals_counter = 0;
+  struct pocl_argument *al;
+  unsigned i;
   for (i = 0; i < meta->num_args; ++i) {
-    al = &(cmd->command.run.arguments[i]);
-    if (ARG_IS_LOCAL(meta->arg_info[i]))
-      // No kernels with local args at the moment, should not end up here
-      POCL_ABORT_UNIMPLEMENTED("almaif: local arguments");
-    else if (meta->arg_info[i].type == POCL_ARG_TYPE_POINTER) {
-      /* It's legal to pass a NULL pointer to clSetKernelArguments. In
-         that case we must pass the same NULL forward to the kernel.
-         Otherwise, the user must have created a buffer with per device
-         pointers stored in the cl_mem. */
+    al = &(run->arguments[i]);
+    if (ARG_IS_LOCAL(meta->arg_info[i])) {
+      chunk_info_t *local_chunk =
+          pocl_alloc_buffer(data->Dev->AllocRegions, al->size);
+      if (local_chunk == NULL) {
+        POCL_ABORT("Almaif: Failed to allocate local buffer");
+      }
+      event_data->allocad_locals[allocad_locals_counter] = local_chunk;
+      allocad_locals_counter++;
+      size_t buffer = local_chunk->start_address;
+      POCL_MSG_PRINT_ALMAIF("Allocated local buf arg from 0x%zx\n", buffer);
+      if (data->Dev->RelativeAddressing) {
+        if (data->Dev->DataMemory->isInRange(buffer)) {
+          buffer -= data->Dev->DataMemory->PhysAddress();
+        } else if (data->Dev->ExternalMemory->isInRange(buffer)) {
+          buffer -= data->Dev->ExternalMemory->PhysAddress();
+        } else {
+          POCL_ABORT("almaif: local buffer outside of memory");
+        }
+      }
+      POCL_MSG_PRINT_ALMAIF("Setting local buf arg to 0x%zx\n", buffer);
+      CHECK_AND_ALIGN_ARGBUFFER(4);
+      *(size_t *)write_pos = buffer;
+      write_pos += data->Dev->PointerSize;
+    } else if (meta->arg_info[i].type == POCL_ARG_TYPE_POINTER) {
       if (al->value == NULL) {
         *(size_t *)write_pos = 0;
       } else {
-        // almaif doesn't support SVM pointers
         assert(al->is_raw_ptr == 0);
         cl_mem m = (*(cl_mem *)(al->value));
-        size_t buffer = D->Dev->pointerDeviceOffset(
+        size_t buffer = data->Dev->pointerDeviceOffset(
             &(m->device_ptrs[cmd->device->global_mem_id]));
         buffer += al->offset;
-        if (D->Dev->RelativeAddressing) {
-          if (D->Dev->DataMemory->isInRange(buffer)) {
-            buffer -= D->Dev->DataMemory->PhysAddress();
-          } else if (D->Dev->ExternalMemory->isInRange(buffer)) {
-            buffer -= D->Dev->ExternalMemory->PhysAddress();
+        if (data->Dev->RelativeAddressing) {
+          if (data->Dev->DataMemory->isInRange(buffer)) {
+            buffer -= data->Dev->DataMemory->PhysAddress();
+          } else if (data->Dev->ExternalMemory->isInRange(buffer)) {
+            buffer -= data->Dev->ExternalMemory->PhysAddress();
           } else {
             POCL_ABORT("almaif: buffer outside of memory");
           }
@@ -1253,7 +1137,7 @@ void submit_kernel_packet(AlmaifData *D, _cl_command_node *cmd) {
         CHECK_AND_ALIGN_ARGBUFFER(4);
         *(size_t *)write_pos = buffer;
       }
-      write_pos += D->Dev->PointerSize;
+      write_pos += data->Dev->PointerSize;
     } else if (meta->arg_info[i].type == POCL_ARG_TYPE_IMAGE) {
       POCL_ABORT_UNIMPLEMENTED("almaif: image arguments");
     } else if (meta->arg_info[i].type == POCL_ARG_TYPE_SAMPLER) {
@@ -1275,17 +1159,253 @@ void submit_kernel_packet(AlmaifData *D, _cl_command_node *cmd) {
     }
   }
 
-  scheduleNDRange(D, cmd, arg_size, arguments);
+  // Additional space for a signal
+  size_t extraAlloc = sizeof(struct CommandMetadata);
+  chunk_info_t *chunk = pocl_alloc_buffer_from_region(data->Dev->AllocRegions,
+                                                      arg_size + extraAlloc);
+  assert(chunk && "Failed to allocate signal/argument buffer");
+
+  POCL_MSG_PRINT_ALMAIF("almaif: allocated 0x%zx bytes for signal/arguments "
+                        "from 0x%zx\n",
+                        arg_size + extraAlloc, chunk->start_address);
+  assert(event_data);
+  assert(event_data->cmd_meta == NULL);
+  event_data->cmd_meta = chunk;
+
+  size_t commandMetaAddress = chunk->start_address;
+  size_t signalAddress =
+      commandMetaAddress + offsetof(CommandMetadata, completion_signal);
+  size_t argsAddress = chunk->start_address + sizeof(struct CommandMetadata);
+  POCL_MSG_PRINT_ALMAIF("Signal address=0x%zx\n", signalAddress);
+  // clear the timestamps and initial signal value
+  for (unsigned offset = 0; offset < sizeof(CommandMetadata); offset += 4)
+    data->Dev->DataMemory->Write32(
+        commandMetaAddress - data->Dev->DataMemory->PhysAddress() + offset, 0);
+  //  if (cmd->device->device_side_printf) {
+  //    data->Dev->DataMemory->Write32(
+  //        commandMetaAddress - data->Dev->DataMemory->PhysAddress() +
+  //            offsetof(CommandMetadata, printf_buffer_start),
+  //        ((chunk_info_t *)data->PrintfBuffer)->start_address);
+  //    data->Dev->DataMemory->Write32(commandMetaAddress -
+  //                                       data->Dev->DataMemory->PhysAddress()
+  //                                       + offsetof(CommandMetadata,
+  //                                       printf_buffer_size),
+  //                                   cmd->device->printf_buffer_size);
+  //
+  //    data->Dev->DataMemory->Write32(
+  //        commandMetaAddress - data->Dev->DataMemory->PhysAddress() +
+  //            offsetof(CommandMetadata, printf_buffer_position),
+  //        ((chunk_info_t *)data->PrintfPosition)->start_address);
+  //  }
+
+  // Set arguments
+  data->Dev->DataMemory->CopyToMMAP(argsAddress, arguments, arg_size);
+
+  struct AQLDispatchPacket packet = {};
+
+  packet.header = AQL_PACKET_INVALID;
+  packet.dimensions = run->pc.work_dim; // number of dimensions
+
+  packet.workgroup_size_x = run->pc.local_size[0];
+  packet.workgroup_size_y = run->pc.local_size[1];
+  packet.workgroup_size_z = run->pc.local_size[2];
+
+  packet.grid_size_x = run->pc.local_size[0] * run->pc.num_groups[0];
+  packet.grid_size_y = run->pc.local_size[1] * run->pc.num_groups[1];
+  packet.grid_size_z = run->pc.local_size[2] * run->pc.num_groups[2];
+  if (kernelID != -1) {
+    packet.kernel_object = kernelID;
+  } else {
+
+    if (data->Dev->PointerSize == 8) {
+      pocl_context pc;
+      event_data->pocl_context =
+          pocl_alloc_buffer(data->Dev->AllocRegions, sizeof(pocl_context));
+      assert(event_data->pocl_context &&
+             "Failed to allocate pocl context on device\n");
+
+      // Compilation needs pocl_context struct, create it, copy it to device and
+      // pass the pointer to it in the 'pocl_context' slot of AQL kernel
+      // dispatch packet.
+      pc.work_dim = run->pc.work_dim;
+      pc.local_size[0] = run->pc.local_size[0];
+      pc.local_size[1] = run->pc.local_size[1];
+      pc.local_size[2] = run->pc.local_size[2];
+      pc.num_groups[0] = run->pc.num_groups[0];
+      pc.num_groups[1] = run->pc.num_groups[1];
+      pc.num_groups[2] = run->pc.num_groups[2];
+      pc.global_offset[0] = run->pc.global_offset[0];
+      pc.global_offset[1] = run->pc.global_offset[1];
+      pc.global_offset[2] = run->pc.global_offset[2];
+      pc.global_var_buffer = 0;
+
+      //    if (cmd->device->device_side_printf) {
+      //      pc.printf_buffer = ((chunk_info_t
+      //      *)data->PrintfBuffer)->start_address; pc.printf_buffer_capacity =
+      //      cmd->device->printf_buffer_size;
+      //      assert(pc.printf_buffer_capacity);
+      //
+      //      pc.printf_buffer_position =
+      //          ((chunk_info_t *)data->PrintfPosition)->start_address;
+      //      POCL_MSG_PRINT_ALMAIF(
+      //          "Device side printf buffer=%d, position: %d and capacity %d
+      //          \n", pc.printf_buffer, pc.printf_buffer_position,
+      //          pc.printf_buffer_capacity);
+      //
+      //      data->Dev->DataMemory->Write32(
+      //          pc.printf_buffer_position -
+      //          data->Dev->DataMemory->PhysAddress(), 0);
+      //    }
+
+      size_t pc_start_addr = event_data->pocl_context->start_address;
+      data->Dev->DataMemory->CopyToMMAP(pc_start_addr, &pc,
+                                        sizeof(pocl_context));
+
+      if (data->Dev->RelativeAddressing) {
+        pc_start_addr -= data->Dev->DataMemory->PhysAddress();
+      }
+
+      packet.pocl_context32b = pc_start_addr;
+
+    } else if (data->Dev->PointerSize == 4) {
+      pocl_context32 pc;
+      event_data->pocl_context =
+          pocl_alloc_buffer(data->Dev->AllocRegions, sizeof(pocl_context32));
+      assert(event_data->pocl_context &&
+             "Failed to allocate pocl context on device\n");
+
+      // Compilation needs pocl_context struct, create it, copy it to device and
+      // pass the pointer to it in the 'pocl_context32b' slot of AQL kernel
+      // dispatch packet.
+      pc.work_dim = run->pc.work_dim;
+      pc.local_size[0] = run->pc.local_size[0];
+      pc.local_size[1] = run->pc.local_size[1];
+      pc.local_size[2] = run->pc.local_size[2];
+      pc.num_groups[0] = run->pc.num_groups[0];
+      pc.num_groups[1] = run->pc.num_groups[1];
+      pc.num_groups[2] = run->pc.num_groups[2];
+      pc.global_offset[0] = run->pc.global_offset[0];
+      pc.global_offset[1] = run->pc.global_offset[1];
+      pc.global_offset[2] = run->pc.global_offset[2];
+      pc.global_var_buffer = 0;
+
+      if (cmd->device->device_side_printf) {
+        pc.printf_buffer = ((chunk_info_t *)data->PrintfBuffer)->start_address;
+        pc.printf_buffer_capacity = cmd->device->printf_buffer_size;
+        assert(pc.printf_buffer_capacity);
+
+        pc.printf_buffer_position =
+            ((chunk_info_t *)data->PrintfPosition)->start_address;
+        POCL_MSG_PRINT_ALMAIF(
+            "Device side printf buffer=%d, position: %d and capacity %d \n",
+            pc.printf_buffer, pc.printf_buffer_position,
+            pc.printf_buffer_capacity);
+
+        data->Dev->DataMemory->Write32(pc.printf_buffer_position -
+                                           data->Dev->DataMemory->PhysAddress(),
+                                       0);
+      }
+
+      size_t pc_start_addr = event_data->pocl_context->start_address;
+      data->Dev->DataMemory->CopyToMMAP(pc_start_addr, &pc,
+                                        sizeof(pocl_context32));
+
+      if (data->Dev->RelativeAddressing) {
+        pc_start_addr -= data->Dev->DataMemory->PhysAddress();
+      }
+
+      packet.pocl_context32b = pc_start_addr;
+
+      if (kernelID == -1 && data->compilationData &&
+          data->compilationData->produce_standalone_program) {
+        data->compilationData->produce_standalone_program(data, cmd, &pc,
+                                                          arg_size, arguments);
+      }
+    }
+
+    almaif_kernel_data_t *kd =
+        (almaif_kernel_data_t *)run->kernel->data[cmd->program_device_i];
+    packet.kernel_object = POCL_CDBI_JIT_COMPILER;
+    data->Dev->DataMemory->Write64(
+        commandMetaAddress - data->Dev->DataMemory->PhysAddress() +
+            offsetof(CommandMetadata, kernel_func_ptr),
+        kd->kernel_address);
+
+    POCL_MSG_PRINT_ALMAIF("Kernel addresss=0x%" PRIx64 "\n",
+                          kd->kernel_address);
+  }
+
+  if (data->Dev->RelativeAddressing) {
+    packet.kernarg_address = argsAddress - data->Dev->DataMemory->PhysAddress();
+    packet.command_meta_address =
+        commandMetaAddress - data->Dev->DataMemory->PhysAddress();
+  } else {
+    packet.kernarg_address = argsAddress;
+    packet.command_meta_address = commandMetaAddress;
+  }
+
+  POCL_MSG_PRINT_ALMAIF("ArgsAddress=0x%" PRIx64
+                        " CommandMetaAddress=0x%" PRIx64 " \n",
+                        packet.kernarg_address, packet.command_meta_address);
+
+  POCL_LOCK(data->AQLQueueLock);
+  uint32_t queue_length = data->Dev->CQMemory->Size() / AQL_PACKET_LENGTH - 1;
+
+  uint32_t write_iter = data->Dev->CQMemory->Read32(ALMAIF_CQ_WRITE);
+  uint32_t read_iter = data->Dev->CQMemory->Read32(ALMAIF_CQ_READ);
+  while (write_iter >= read_iter + queue_length) {
+    POCL_MSG_PRINT_ALMAIF("write_iter=%u, read_iter=%u length=%u", write_iter,
+                          read_iter, queue_length);
+    usleep(ALMAIF_DRIVER_SLEEP);
+    read_iter = data->Dev->CQMemory->Read32(ALMAIF_CQ_READ);
+#ifdef ALMAIF_DUMP_MEMORY
+    POCL_MSG_PRINT_ALMAIF("WAITING FOR CQMEMORY TO EMPTY DUMP\n");
+    data->Dev->printMemoryDump();
+#endif
+  }
+  uint32_t packet_loc =
+      (write_iter % queue_length) * AQL_PACKET_LENGTH + AQL_PACKET_LENGTH;
+  data->Dev->CQMemory->CopyToMMAP(
+      packet_loc + data->Dev->CQMemory->PhysAddress(), &packet, 64);
+
+#ifdef ALMAIF_DUMP_MEMORY
+  POCL_MSG_PRINT_ALMAIF("PRELAUNCH MEMORY DUMP\n");
+  data->Dev->printMemoryDump();
+#endif
+
+  // finally, set header as not-invalid
+  data->Dev->CQMemory->Write16(packet_loc, (1 << AQL_PACKET_KERNEL_DISPATCH) |
+                                               AQL_PACKET_BARRIER);
+
+  POCL_MSG_PRINT_ALMAIF(
+      "almaif: Handed off a packet for execution, write iter=%u\n", write_iter);
+  // Increment queue index
+  data->Dev->CQMemory->Write32(ALMAIF_CQ_WRITE, write_iter + 1);
+
+  POCL_UNLOCK(data->AQLQueueLock);
+
+  free(arguments);
 
   POCL_MEM_FREE(cmd->command.run.device_data);
-  free(arguments);
 }
 
 void pocl_almaif_free_event_data(cl_event event) {
   almaif_event_data_t *ed = (almaif_event_data_t *)event->data;
   if (ed) {
-    if (ed->chunk != NULL) {
-      pocl_free_chunk((chunk_info_t *)ed->chunk);
+    if (ed->cmd_meta != NULL) {
+      pocl_free_chunk(ed->cmd_meta);
+      ed->cmd_meta = NULL;
+    }
+    if (ed->pocl_context != NULL) {
+      pocl_free_chunk(ed->pocl_context);
+      ed->pocl_context = NULL;
+    }
+    if (ed->num_allocad_locals) {
+      for (int i = 0; i < ed->num_allocad_locals; i++) {
+        pocl_free_chunk(ed->allocad_locals[i]);
+      }
+      free(ed->allocad_locals);
+      ed->num_allocad_locals = 0;
     }
     POCL_DESTROY_COND(ed->event_cond);
     POCL_MEM_FREE(event->data);

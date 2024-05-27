@@ -40,6 +40,7 @@
 #ifdef ENABLE_COMPILER
 #include "openasip/AlmaifCompileOpenasip.hh"
 #endif
+#include "mlir/AlmaifCompileMLIR.hh"
 
 extern int pocl_offline_compile;
 
@@ -53,12 +54,6 @@ int pocl_almaif_compile_init(unsigned j, cl_device_id dev,
   if (d->compilationData == NULL)
     return CL_OUT_OF_HOST_MEMORY;
 
-  if (!pocl_offline_compile) {
-    d->compilationData->pocl_context =
-        pocl_alloc_buffer(d->Dev->AllocRegions, sizeof(pocl_context32));
-    assert(d->compilationData->pocl_context &&
-           "Failed to allocate pocl context on device\n");
-  }
 
   /**********************************************************/
 
@@ -96,11 +91,18 @@ int pocl_almaif_compile_init(unsigned j, cl_device_id dev,
   compilation_data_t *adi = (compilation_data_t *)d->compilationData;
   adi->produce_standalone_program = NULL;
 
+  adi->initialize_device = pocl_almaif_mlir_initialize;
+  adi->cleanup_device = pocl_almaif_mlir_cleanup;
+  adi->compile_kernel = pocl_almaif_mlir_compile;
+  POCL_MSG_PRINT_ALMAIF("Starting device specific initializion\n");
+  adi->initialize_device(dev, parameters);
+
+  POCL_MSG_PRINT_ALMAIF("Device specific initializion done\n");
 #ifdef ENABLE_COMPILER
   // TODO tce specific
-  adi->initialize_device = pocl_almaif_openasip_initialize;
-  adi->cleanup_device = pocl_almaif_openasip_cleanup;
-  adi->compile_kernel = pocl_almaif_openasip_compile;
+  adi->initialize_device = pocl_almaif_mlir_initialize;
+  adi->cleanup_device = pocl_almaif_mlir_cleanup;
+  adi->compile_kernel = pocl_almaif_mlir_compile;
   if (pocl_get_bool_option("POCL_ALMAIF_STANDALONE", 0)) {
     adi->produce_standalone_program =
         pocl_almaif_openasip_produce_standalone_program;
@@ -112,8 +114,8 @@ int pocl_almaif_compile_init(unsigned j, cl_device_id dev,
   POCL_MSG_PRINT_ALMAIF("Device specific initializion done\n");
 
   SHA1_digest_t digest;
-  pocl_almaif_openasip_device_hash(parameters.c_str(), dev->llvm_target_triplet,
-                                   (char *)digest);
+  pocl_almaif_mlir_device_hash(parameters.c_str(), dev->llvm_target_triplet,
+                               (char *)digest);
   POCL_MSG_PRINT_ALMAIF("ALMAIF TCE DEVICE HASH=%s", (char *)digest);
   adi->build_hash = strdup((char *)digest);
 
@@ -128,17 +130,19 @@ int pocl_almaif_compile_init(unsigned j, cl_device_id dev,
 #endif
 
   dev->ops->build_hash = pocl_almaif_compile_build_hash;
-  dev->ops->build_source = pocl_driver_build_source;
-  dev->ops->setup_metadata = pocl_driver_setup_metadata;
+  dev->ops->build_source = pocl_almaif_mlir_build_source;
+  dev->ops->setup_metadata = pocl_almaif_mlir_setup_metadata;
   dev->ops->create_kernel = pocl_almaif_create_kernel;
   dev->ops->free_kernel = pocl_almaif_free_kernel;
   dev->ops->build_poclbinary = pocl_driver_build_poclbinary;
   dev->ops->build_binary = pocl_almaif_build_binary;
-#ifdef ENABLE_COMPILER
-  dev->ops->compile_kernel = pocl_almaif_openasip_compile;
-  dev->ops->init_build = pocl_almaif_openasip_init_build;
-  dev->ops->build_builtin = pocl_driver_build_opencl_builtins;
-#endif
+  dev->ops->compile_kernel = pocl_almaif_mlir_compile;
+  dev->ops->compile_kernels = pocl_almaif_mlir_compile_kernels;
+  dev->ops->create_finalized_command_buffer =
+      pocl_almaif_mlir_create_finalized_command_buffer;
+  dev->ops->run_command_buffer = pocl_almaif_mlir_run_command_buffer;
+  dev->ops->free_command_buffer = pocl_almaif_mlir_free_command_buffer;
+  dev->ops->init_build = pocl_almaif_mlir_init_build;
   return CL_SUCCESS;
 }
 
@@ -149,7 +153,6 @@ cl_int pocl_almaif_compile_uninit(cl_device_id dev) {
   d->compilationData->cleanup_device(dev);
 #endif
 
-  pocl_free_chunk(d->compilationData->pocl_context);
   pocl_aligned_free(d->compilationData);
 
   return CL_SUCCESS;
@@ -171,23 +174,85 @@ int pocl_almaif_compile_kernel(_cl_command_node *cmd, cl_kernel kernel,
   POCL_MSG_PRINT_ALMAIF("Current kernel %p, new kernel %p\n",
                        (void*)d->compilationData->current_kernel, (void*)kernel);
 
-  /* if (d->compilationData->current_kernel == kernel) {
-     POCL_MSG_PRINT_ALMAIF(
-         "kernel %s is the currently loaded kernel, nothing to do\n",
-         kernel->name);
-     return;
-   }*/
+  bool force_program_xclbin =
+      pocl_get_bool_option("POCL_MLIR_FORCE_PROGRAM_XCLBIN", false);
+  bool disable_cmd_buffer_fusion =
+      pocl_get_bool_option("POCL_MLIR_DISABLE_CMD_BUFFER_FUSION", false);
+  if (force_program_xclbin) {
+    cl_program prog = kernel->program;
+    int k = 0;
+    for (k = 0; k < prog->num_kernels; ++k) {
+      if (!strcmp(prog->kernel_meta[k].name, kernel->name)) {
+        break;
+      }
+    }
+    if (k == prog->num_kernels) {
+      POCL_ABORT("Kernel not found from the program, even though the program "
+                 "should have all the kernels\n");
+    }
+    POCL_MSG_PRINT_ALMAIF(
+        "Almaif compile setting kernel id to %d for kernel %s\n", k,
+        kernel->name);
+    almaif_kernel_data_t *kd =
+        (almaif_kernel_data_t *)kernel->data[cmd->program_device_i];
+    kd->kernel_address = k;
+    if (d->compilationData->current_kernel &&
+        d->compilationData->current_kernel->program == program) {
+      POCL_MSG_PRINT_ALMAIF("The kernel is included in the currently loaded "
+                            "program, nothing to do\n");
+      return CL_SUCCESS;
+    }
+  } else if (disable_cmd_buffer_fusion) {
+    cl_command_buffer_khr cmd_buf = kernel->higher_level_cmd_buf;
+    int k = 0;
+    _cl_command_node *cmd;
+    bool found_it = false;
+    POCL_MSG_PRINT_ALMAIF("Trying to find kernel: %s\n", kernel->name);
+    LL_FOREACH (cmd_buf->cmds, cmd) {
+      POCL_MSG_PRINT_ALMAIF(
+          "Comparing against name: %s\n",
+          cmd_buf->fake_single_kernel_cmd_buffers[k]->megaKernel->name);
+      if (!strcmp(cmd_buf->fake_single_kernel_cmd_buffers[k]->megaKernel->name,
+                  kernel->name)) {
+        found_it = true;
+        break;
+      }
+      k++;
+    }
+    if (!found_it) {
+      POCL_ABORT("Kernel not found from the cmd buf, even though the cmd buf "
+                 "should have all the kernels\n");
+    }
+    POCL_MSG_PRINT_ALMAIF(
+        "Almaif compile setting non-fused cmd buffer id to %d for kernel %s\n",
+        k, kernel->name);
+    almaif_kernel_data_t *kd =
+        (almaif_kernel_data_t *)kernel->data[cmd->program_device_i];
+    kd->kernel_address = k;
+    if (d->compilationData->current_kernel &&
+        d->compilationData->current_kernel->higher_level_cmd_buf == cmd_buf) {
+      POCL_MSG_PRINT_ALMAIF("The kernel is included in the currently loaded "
+                            "command buffer, nothing to do\n");
+      return CL_SUCCESS;
+    }
 
-#ifdef ENABLE_COMPILER
-  if (!program->pocl_binaries[dev_i]) {
-    POCL_MSG_PRINT_ALMAIF("Compiling kernel %s to poclbinary\n", kernel->name);
-
-    int status =
-        d->compilationData->compile_kernel(cmd, kernel, device, specialize);
-    if (status != CL_SUCCESS)
-      return status;
+  } else {
+    if (d->compilationData->current_kernel == kernel) {
+      POCL_MSG_PRINT_ALMAIF("The kernel is already loaded in, no need to "
+                            "compile, unload or reload\n");
+      return CL_SUCCESS;
+    }
   }
-#endif
+
+  if (!pocl_offline_compile) {
+    d->Dev->unloadProgram();
+  }
+
+  if (!force_program_xclbin && !disable_cmd_buffer_fusion) {
+    POCL_MSG_PRINT_ALMAIF("Compiling specialized kernel %s to poclbinary\n",
+                          kernel->name);
+    d->compilationData->compile_kernel(cmd, kernel, device, specialize);
+  }
 
   if (pocl_offline_compile) {
     return CL_SUCCESS;

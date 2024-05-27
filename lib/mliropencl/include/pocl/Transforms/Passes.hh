@@ -24,6 +24,7 @@
 #ifndef POCL_TRANSFORMS_PASSES_HH
 #define POCL_TRANSFORMS_PASSES_HH
 
+#include <mlir/IR/BuiltinOps.h>
 #include <mlir/Pass/Pass.h>
 #include <mlir/Pass/PassRegistry.h>
 
@@ -37,14 +38,23 @@ namespace mlir {
 namespace pocl {
 
 #define GEN_PASS_DECL_DISTRIBUTEBARRIERS
+#define GEN_PASS_DECL_CONVERTMEMREFTOLLVMKERNELARGS
 #include "pocl/Transforms/Passes.h.inc"
 
 std::unique_ptr<mlir::Pass> createWorkgroupPass();
 std::unique_ptr<mlir::Pass> createConvertAffineParallelToAffineForPass();
 std::unique_ptr<mlir::Pass> createConvertMemrefToLLVMKernelArgsPass();
+std::unique_ptr<mlir::Pass> createConvertMemrefToLLVMKernelArgsPass(
+    mlir::pocl::ConvertMemrefToLLVMKernelArgsOptions options);
 std::unique_ptr<mlir::Pass> createLowerOpenCLBuiltinsPass();
 std::unique_ptr<mlir::Pass> createLinkerPass(mlir::ModuleOp BuiltinLib);
 std::unique_ptr<mlir::Pass> createStripMemSpacesPass();
+std::unique_ptr<mlir::Pass> createMem2RegPass();
+std::unique_ptr<mlir::Pass>
+createDistributeBarriersPass(mlir::pocl::DistributeBarriersOptions method);
+std::unique_ptr<mlir::Pass> createDistributeBarriersPass();
+std::unique_ptr<mlir::Pass> replaceAffineCFGPass();
+std::unique_ptr<mlir::Pass> createDetectReductionPass();
 
 #define GEN_PASS_REGISTRATION
 #include "pocl/Transforms/Passes.h.inc"

@@ -133,16 +133,18 @@ struct AQLQueueInfo {
 enum ALMAIF_DEVICE_TYPE : size_t {
   POCL_ALMAIFDEVICE_XRT = 0xA,
   POCL_ALMAIFDEVICE_TTASIM = 0xB,
+  POCL_ALMAIFDEVICE_OPAE = 0xC,
   POCL_ALMAIFDEVICE_EMULATION = 0xE,
   POCL_ALMAIFDEVICE_BITSTREAMDATABASE = 0xF,
 };
 
 struct CommandMetadata {
   uint32_t completion_signal;
-  uint32_t reserved0;
+  uint32_t reserved;
   uint64_t start_timestamp;
   uint64_t finish_timestamp;
-  uint64_t reserved1;
+  // Meant to be used with POCL_CDBI_JIT_COMPILER kernels
+  uint64_t kernel_func_ptr;
 };
 
 struct AQLDispatchPacket {
@@ -164,7 +166,7 @@ struct AQLDispatchPacket {
   uint64_t kernel_object;
   uint64_t kernarg_address;
 
-  uint64_t reserved;
+  uint64_t pocl_context32b;
 
   uint64_t command_meta_address;
 };
@@ -209,6 +211,14 @@ struct AlmaifData {
 
   // Backend-agnostic compilation data
   compilation_data_t *compilationData;
+};
+
+struct almaif_event_data_t {
+  pthread_cond_t event_cond;
+  chunk_info_t *cmd_meta;
+  chunk_info_t *pocl_context;
+  int num_allocad_locals;
+  chunk_info_t **allocad_locals;
 };
 
 bool isEventDone(AlmaifData *data, cl_event event);

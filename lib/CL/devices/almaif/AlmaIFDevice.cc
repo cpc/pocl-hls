@@ -50,13 +50,14 @@ AlmaIFDevice::~AlmaIFDevice() {
 
 void AlmaIFDevice::discoverDeviceParameters() {
   // Reset accelerator
-  ControlMemory->Write32(ALMAIF_CONTROL_REG_COMMAND, ALMAIF_RESET_CMD);
+  // ControlMemory->Write32(ALMAIF_CONTROL_REG_COMMAND, ALMAIF_RESET_CMD);
 
   if (ControlMemory->Read32(ALMAIF_INFO_CORE_COUNT) != 1) {
     POCL_ABORT_UNIMPLEMENTED("Multicore accelerators");
   }
 
   uint32_t interface_version = ControlMemory->Read32(ALMAIF_INFO_IF_TYPE);
+  interface_version = ControlMemory->Read32(ALMAIF_INFO_IF_TYPE);
 
   if (interface_version == ALMAIF_VERSION_2) {
     /*Only AamuDSP should be using the old interface, if somethine else is,
@@ -128,6 +129,8 @@ void AlmaIFDevice::discoverDeviceParameters() {
   POCL_MSG_PRINT_ALMAIF(
       "Reserved %d bytes at the start of global memory for constant data\n",
       ALMAIF_DEFAULT_CONSTANT_MEM_SIZE);
+
+  ControlMemory->Write32(ALMAIF_CONTROL_REG_COMMAND, ALMAIF_RESET_CMD);
 }
 
 void AlmaIFDevice::loadProgramToDevice(almaif_kernel_data_s *KernelData,

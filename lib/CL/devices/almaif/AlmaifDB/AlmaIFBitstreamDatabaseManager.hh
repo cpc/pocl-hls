@@ -62,12 +62,12 @@ public:
     std::string FirmwarePath;
     std::string KernelName;
   };
-  const ProgrammingFiles &getBitstreamFile(BuiltinKernelId BikID,
+  const ProgrammingFiles &getBitstreamFile(cl_dbk_id_exp BikID,
                                            DEVICE_TYPE UsedDeviceType);
-  const ProgrammingFiles &getFirmwareFile(BuiltinKernelId BikID,
+  const ProgrammingFiles &getFirmwareFile(cl_dbk_id_exp BikID,
                                           DEVICE_TYPE UsedDeviceType);
 
-  std::vector<BuiltinKernelId>
+  std::vector<cl_dbk_id_exp>
   supportedBuiltinKernels(DEVICE_TYPE UsedDeviceType);
   std::string externalMemoryParameters(DEVICE_TYPE UsedDeviceType);
   std::string defaultBitstream();

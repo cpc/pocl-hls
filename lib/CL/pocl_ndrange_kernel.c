@@ -506,7 +506,9 @@ pocl_record_ndrange_kernel (cl_command_buffer_khr command_buffer,
                             _cl_command_node **cmd_ptr)
 {
   int assert_no_add_wgs = CL_FALSE;
-  cl_mutable_dispatch_fields_khr updatable_fields = 0;
+  cl_device_id realdev = pocl_real_dev (command_queue->device);
+  cl_mutable_dispatch_fields_khr updatable_fields
+    = realdev->cmdbuf_mutable_dispatch_capabilities;
 
   int errcode = process_command_ndrange_properties (
     &assert_no_add_wgs, &updatable_fields, properties);
@@ -640,6 +642,7 @@ pocl_ndrange_kernel_common (cl_command_buffer_khr command_buffer,
 
   c->command.run.kernel = kernel;
   c->command.run.hash = kernel->meta->build_hash[program_dev_i];
+  c->command.run.updatable_fields = updatable_fields;
   c->command.run.pc.local_size[0] = local[0];
   c->command.run.pc.local_size[1] = local[1];
   c->command.run.pc.local_size[2] = local[2];

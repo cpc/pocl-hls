@@ -32,6 +32,10 @@ llvm_update_compile_flags(pocl-mlir-opt)
 target_include_directories(pocl-mlir-opt SYSTEM PRIVATE ${MLIR_INCLUDE_DIRS})
 target_include_directories(pocl-mlir-opt PRIVATE "${CMAKE_SOURCE_DIR}/lib/mliropencl/include")
 target_include_directories(pocl-mlir-opt PRIVATE "${CMAKE_BINARY_DIR}/lib/mliropencl/include")
+if(ENABLE_SCALEHLS)
+  target_include_directories(pocl-mlir-opt PRIVATE "${SCALEHLS_INCLUDE_DIR}")
+  target_compile_definitions(pocl-mlir-opt PRIVATE ENABLE_SCALEHLS)
+endif()
 
 if(LLVM_PACKAGE_VERSION)
   set(LIBMLIRPASSES "obj.mlirpasses")
@@ -51,4 +55,7 @@ target_link_libraries(pocl-mlir-opt
     ${LIBPOCLDIALECT}
     ${LIBMLIRPASSES}
     ${POCL_LIBRARY_NAME}
+    isl
+   $<$<BOOL:${ENABLE_SCALEHLS}>:${SCALEHLS_LIB_DIR}/libMLIRScaleHLSTransforms.a>
+   $<$<BOOL:${ENABLE_SCALEHLS}>:${SCALEHLS_LIB_DIR}/libMLIRHLS.a>
 )

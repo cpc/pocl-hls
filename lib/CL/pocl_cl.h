@@ -26,6 +26,7 @@
 #ifndef POCL_CL_H
 #define POCL_CL_H
 
+#include "CL/cl_ext.h"
 #include "config.h"
 
 #include <assert.h>
@@ -818,6 +819,12 @@ struct pocl_device_ops {
                          cl_device_id device,
                          int specialize);
 
+  int (*compile_kernels) (int num_kernels,
+                          _cl_command_node **cmds,
+                          cl_kernel *kernels,
+                          cl_device_id device,
+                          int specialize);
+
   /** Optional: If the target can utilize the basic Clang-driven steps for
    * other compilation steps, but the final linkage step, this function can be
    * used to define them.
@@ -1051,6 +1058,11 @@ struct pocl_device_ops {
   cl_int (*free_command_buffer) (cl_device_id device,
                                  cl_command_buffer_khr command_buffer);
 
+  cl_int (*run_command_buffer) (cl_device_id device,
+                                cl_command_buffer_khr cmd,
+                                cl_uint num_events_in_wait_list,
+                                const cl_event *event_wait_list,
+                                cl_event *event);
 };
 
 typedef struct pocl_global_mem_t {
@@ -1622,6 +1634,14 @@ struct _cl_command_buffer_khr
    * wait lists when recording commands. */
   cl_uint num_syncpoints;
 
+  /* Only valid when the cmd buffer has been finalized */
+  cl_kernel megaKernel;
+  cl_program megaProgram;
+  int *num_of_settable_arguments; // for each ndrange cmd, includes hidden
+                                  // mutable global size, if it's being used.
+  void *aliasing_data;
+  cl_command_buffer_khr *fake_single_kernel_cmd_buffers;
+
   _cl_command_node *cmds;
   cl_bool is_mutable;
   cl_bool assert_no_more_wgs;
@@ -1855,7 +1875,6 @@ struct _cl_mem_list_item_t
   cl_mem_list_item_t *prev, *next;
 };
 
-typedef uint8_t SHA1_digest_t[SHA1_DIGEST_SIZE * 2 + 1];
 
 typedef struct pocl_kernel_metadata_s
 {
@@ -1906,6 +1925,8 @@ typedef struct pocl_kernel_metadata_s
   /* device-specific METAdata, void* array[program->num_devices] */
   void **data;
 } pocl_kernel_metadata_t;
+
+typedef uint8_t SHA1_digest_t[SHA1_DIGEST_SIZE * 2 + 1];
 
 #define MAIN_PROGRAM_LOG_SIZE 6400
 
@@ -2045,6 +2066,8 @@ struct _cl_kernel {
      We should ensure at enqueue time that all of the known raw buffers
      will be synchronized to the device. */
   char can_access_all_raw_buffers_indirectly;
+
+  cl_command_buffer_khr higher_level_cmd_buf;
 
   /* for program's linked list of kernels */
   struct _cl_kernel *next;

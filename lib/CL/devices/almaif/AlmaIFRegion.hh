@@ -28,15 +28,16 @@
 #include "pocl_types.h"
 
 #include <stdlib.h>
+#include <string>
 
 class AlmaIFRegion {
 public:
   virtual ~AlmaIFRegion();
-  virtual uint32_t Read32(size_t offset) = 0;
-  virtual void Write32(size_t offset, uint32_t value) = 0;
-  virtual void Write16(size_t offset, uint16_t value) = 0;
-  virtual uint64_t Read64(size_t offset) = 0;
-  virtual void Write64(size_t offset, uint64_t value) = 0;
+  virtual uint32_t Read32(size_t offset);
+  virtual void Write32(size_t offset, uint32_t value);
+  virtual void Write16(size_t offset, uint16_t value);
+  virtual uint64_t Read64(size_t offset);
+  virtual void Write64(size_t offset, uint64_t value);
 
   virtual void CopyToMMAP(size_t destination, const void *source,
                           size_t bytes) = 0;
@@ -46,6 +47,7 @@ public:
   virtual bool isInRange(size_t dst);
   virtual size_t PhysAddress();
   virtual size_t Size();
+  virtual void initRegion(const std::string &init_file);
 
 protected:
   size_t PhysAddress_;

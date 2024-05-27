@@ -30,7 +30,8 @@
 namespace pocl::mlir {
 using namespace ::mlir;
 
-int runAffinePasses(mlir::OwningOpRef<mlir::ModuleOp> &Mod, bool raiseAffine);
+int runAffinePasses(mlir::OwningOpRef<mlir::ModuleOp> &Mod, bool RaiseAffine,
+                    bool Inline = false);
 } // namespace pocl::mlir
 
 #endif

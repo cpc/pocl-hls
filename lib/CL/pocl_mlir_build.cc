@@ -33,6 +33,7 @@
 #include <mlir/IR/OwningOpRef.h>
 #include <mlir/Pass/PassManager.h>
 
+#include "almaif/AlmaifCompile.hh"
 #include "pocl.h"
 #include "pocl_cache.h"
 #include "pocl_cl.h"
@@ -312,7 +313,7 @@ int poclMlirGenerateWorkgroupFunctionNowrite(unsigned DeviceI,
   if (!pocl_exists(KernelParallelLlPath)) {
     int Error =
         poclMlirGenerateLlvmFunction(Command->program_device_i, Device, Kernel,
-                                     Command, Specialize, Cachedir);
+                                     Command, Specialize, Cachedir, 0);
 
     POCL_MSG_PRINT_LLVM("Generated %s\n", KernelParallelLlPath);
     if (Error) {
@@ -341,4 +342,113 @@ int poclMlirGenerateWorkgroupFunctionNowrite(unsigned DeviceI,
 void poclDestroyMlirModule(void *Module) {
   llvm::Module *Modp = (llvm::Module *)Module;
   delete Modp;
+}
+
+static int pocl_mlir_generate_program(cl_program program, unsigned device_i,
+                                      mlir::OwningOpRef<mlir::ModuleOp> &Module
+
+) {
+  cl_device_id device = program->devices[device_i];
+  int num_kernels = 0;
+
+  Module->walk([&](mlir::func::FuncOp func) {
+    auto isKernel =
+        func->hasAttr(mlir::gpu::GPUDialect::getKernelFuncAttrName());
+    if (isKernel) {
+      num_kernels++;
+    }
+  });
+
+  _cl_kernel *kernels =
+      (_cl_kernel *)calloc(num_kernels, sizeof(struct _cl_kernel));
+  cl_kernel *kernel_ptrs = (cl_kernel *)calloc(num_kernels, sizeof(cl_kernel));
+  _cl_command_node *cmds =
+      (_cl_command_node *)calloc(num_kernels, sizeof(_cl_command_node));
+  _cl_command_node **cmd_ptrs =
+      (_cl_command_node **)calloc(num_kernels, sizeof(_cl_command_node *));
+
+  {
+    int idx = 0;
+    Module->walk([&](mlir::func::FuncOp func) {
+      auto isKernel =
+          func->hasAttr(mlir::gpu::GPUDialect::getKernelFuncAttrName());
+      std::string funcName = func.getName().str();
+      // POCL_MSG_PRINT_ALMAIF("FOUND function called %s: has kernel attribute
+      // %d\n", funcName.c_str(), isKernel);
+      if (isKernel) {
+        mlir::OwningOpRef<mlir::ModuleOp> clonedModule =
+            mlir::ModuleOp::create(mlir::UnknownLoc::get(Module->getContext()));
+        clonedModule = Module->clone();
+
+        std::vector<mlir::func::FuncOp> funcsToDelete;
+        clonedModule->walk([&](mlir::func::FuncOp clonedFunc) {
+          auto isClonedKernel = clonedFunc->hasAttr(
+              mlir::gpu::GPUDialect::getKernelFuncAttrName());
+          if (isClonedKernel && clonedFunc.getName() != funcName) {
+            funcsToDelete.push_back(func);
+          }
+        });
+
+        cl_kernel fakeKernel = &kernels[idx];
+        kernel_ptrs[idx] = &kernels[idx];
+        POCL_INIT_OBJECT(fakeKernel, program);
+        fakeKernel->name = strdup(funcName.c_str());
+        fakeKernel->context = program->context;
+        fakeKernel->program = program;
+        fakeKernel->data = (void **)calloc(1, sizeof(void *));
+        device->ops->create_kernel(device, program, fakeKernel, 0);
+        _cl_command_node *fake_cmd = &cmds[idx];
+        cmd_ptrs[idx] = fake_cmd;
+        fake_cmd->program_device_i = device->dev_id;
+        fake_cmd->device = device;
+        fake_cmd->type = CL_COMMAND_NDRANGE_KERNEL;
+        fake_cmd->command.run.kernel = fakeKernel;
+        fake_cmd->command.run.hash = calloc(1, sizeof(pocl_kernel_hash_t));
+        fake_cmd->command.run.pc.local_size[0] = 1;
+        fake_cmd->command.run.pc.local_size[1] = 1;
+        fake_cmd->command.run.pc.local_size[2] = 1;
+        fake_cmd->command.run.pc.work_dim = 3;
+        fake_cmd->command.run.pc.num_groups[0] = 1;
+        fake_cmd->command.run.pc.num_groups[1] = 1;
+        fake_cmd->command.run.pc.num_groups[2] = 1;
+        fake_cmd->command.run.pc.global_offset[0] = 0;
+        fake_cmd->command.run.pc.global_offset[1] = 0;
+        fake_cmd->command.run.pc.global_offset[2] = 0;
+
+        fakeKernel->meta = &program->kernel_meta[idx];
+        //      fakeKernel->dyn_arguments = (pocl_argument *)calloc (
+        //        (fakeKernel->meta->num_args), sizeof (struct pocl_argument));
+        //      (pocl_kernel_metadata_t *)calloc(1,
+        //      sizeof(pocl_kernel_metadata_t));
+        //  program->kernel_meta = fakeKernel->meta;
+        //  fakeKernel->meta->build_hash =
+        //      (pocl_kernel_hash_t *)calloc(1, sizeof(pocl_kernel_hash_t));
+        //  memcpy(fakeKernel->meta->build_hash,
+        //         program->build_hash, sizeof(pocl_kernel_hash_t));
+        idx++;
+      }
+    });
+  }
+  device->ops->compile_kernels(num_kernels, cmd_ptrs, kernel_ptrs, device, 0);
+
+  // Kernels[0] is still in use, until the first actual kernel is enqueued.
+  for (int i = 1; i < num_kernels; ++i) {
+    _cl_command_node *fake_cmd = &cmds[i];
+    free(fake_cmd->command.run.hash);
+
+    cl_kernel fakeKernel = &kernels[i];
+    device->ops->free_kernel(device, program, fakeKernel, 0);
+    free(fakeKernel->data);
+    free((char *)fakeKernel->name);
+  }
+  // Cannot free kernels-array yet as the kernels[0] is still in used.
+  // free(kernels); //TODO: MEM LEAK
+  free(cmds); // the cmds[0] is not used, even though the kernels[0] is.
+
+  //  free(fakeKernel->meta->build_hash);
+  //  free(fakeKernel->meta->arg_info);
+  //  free(fakeKernel->meta);
+  //  free(fakeKernel->dyn_arguments);
+  //  free(program->build_hash);
+  return 0;
 }

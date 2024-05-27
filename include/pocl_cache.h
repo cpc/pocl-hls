@@ -44,6 +44,8 @@
    the kernel's temp dir. */
 #define POCL_PARALLEL_BC_FILENAME   "/parallel.bc"
 #define POCL_PARALLEL_MLIR_FILENAME "/parallel.mlir"
+#define POCL_PARALLEL_HLSCPP_FILENAME "/parallel_hls.cpp"
+#define POCL_PARALLEL_HLSOPENCL_FILENAME "/parallel_hls.cl"
 
 #ifdef __cplusplus
 extern "C" {
@@ -125,6 +127,8 @@ int pocl_cache_write_kernel_parallel_bc (void *bc, cl_program program,
                                          _cl_command_node *command,
                                          int specialize);
 
+void pocl_cache_set_cmd_buffer_hash (cl_command_buffer_khr command_buffer);
+
 // required by pocl_binary.c
 POCL_EXPORT
 void pocl_cache_program_path (char *path, cl_program program,
@@ -148,6 +152,14 @@ POCL_EXPORT
 void pocl_cache_program_mlir_path (char *program_bc_path,
                                    cl_program program,
                                    unsigned device_i);
+
+void pocl_cache_program_xclbin_path (char *program_bc_path,
+                                     cl_program program,
+                                     unsigned device_i);
+POCL_EXPORT
+void pocl_cache_program_img_path (char *program_bc_path,
+                                  cl_program program,
+                                  unsigned device_i);
 
 POCL_EXPORT
 void pocl_cache_work_group_function_path (char *parallel_bc_path,

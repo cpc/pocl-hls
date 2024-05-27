@@ -299,10 +299,13 @@ if (ENABLE_LLVM)
     )
     set(MLIR_API_SOURCES "pocl_mlir_build.cc" "pocl_mlir_wg.cc"
                          "pocl_mlir_metadata.cc" "pocl_mlir_utils.cc"
-                         "pocl_mlir_file_util.cc")
+                         "pocl_mlir_file_util.cc" "pocl_mlir_cmd_buffer.cc")
     pocl_build_clang_llvm_object(lib_cl_mlir ${MLIR_API_SOURCES})
     target_include_directories(lib_cl_mlir PRIVATE "${CMAKE_SOURCE_DIR}/lib/mliropencl/include")
     target_include_directories(lib_cl_mlir PRIVATE "${CMAKE_BINARY_DIR}/lib/mliropencl/include")
+    if(ENABLE_SCALEHLS)
+      include_directories("${SCALEHLS_INCLUDE_DIR}")
+    endif()
 
     if(LLVM_PACKAGE_VERSION)
       list(APPEND LIBPOCL_OBJS "$<TARGET_OBJECTS:obj.mlirpasses>")
@@ -384,15 +387,9 @@ if(POCL_DEVICES_LINK_LIST)
 endif()
 
 if(ENABLE_LLVM)
-  if(LLVM_PACKAGE_VERSION)
-    list(APPEND POCL_PRIVATE_LINK_LIST ${POCL_CLANG_LINK_TARGETS} ${POCL_LLVM_LINK_TARGETS} ${LLVM_SYSLIBS})
-  else()
-    list(APPEND POCL_PRIVATE_LINK_LIST ${CLANG_LINK_LIBRARIES} ${LLVM_LINK_LIBRARIES} ${LLVM_SYSLIBS})
-  endif()
-  if (ENABLE_SPIRV AND HAVE_LLVM_SPIRV_LIB)
-    list(PREPEND POCL_PRIVATE_LINK_LIST ${LLVM_SPIRV_LIB})
-  endif()
-
+  # MLIR must be added before libclang-cpp to avoid GNU ld ordering issues:
+  # libclang-cpp depends on libMLIR, and if libclang-cpp appears first on the
+  # link line, the linker cannot resolve libOpenCL's MLIR symbol references.
   if (ENABLE_MLIR)
     if(TARGET MLIR)
       list(APPEND POCL_PRIVATE_LINK_LIST PoclDialect)
@@ -401,7 +398,22 @@ if(ENABLE_LLVM)
       get_property(POCL_MLIR_LINK_LIBS GLOBAL PROPERTY MLIR_ALL_LIBS)
       list(APPEND POCL_MLIR_LINK_LIBS MLIRCIR)
     endif()
-    list(APPEND POCL_PRIVATE_LINK_LIST ${POCL_MLIR_LINK_LIBS})
+    list(APPEND POCL_PRIVATE_LINK_LIST ${POCL_MLIR_LINK_LIBS} isl)
+    if(ENABLE_SCALEHLS)
+      list(APPEND POCL_PRIVATE_LINK_LIST
+        "${SCALEHLS_LIB_DIR}/libMLIRScaleHLSTransforms.a"
+        "${SCALEHLS_LIB_DIR}/libMLIRHLS.a"
+      )
+    endif()
+  endif()
+
+  if(LLVM_PACKAGE_VERSION)
+    list(APPEND POCL_PRIVATE_LINK_LIST ${POCL_CLANG_LINK_TARGETS} ${POCL_LLVM_LINK_TARGETS} ${LLVM_SYSLIBS})
+  else()
+    list(APPEND POCL_PRIVATE_LINK_LIST ${CLANG_LINK_LIBRARIES} ${LLVM_LINK_LIBRARIES} ${LLVM_SYSLIBS})
+  endif()
+  if (ENABLE_SPIRV AND HAVE_LLVM_SPIRV_LIB)
+    list(PREPEND POCL_PRIVATE_LINK_LIST ${LLVM_SPIRV_LIB})
   endif()
 endif()
 

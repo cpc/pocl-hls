@@ -529,6 +529,16 @@ set_property(TEST
   "runtime/test_queue_creation_with_hints"
   APPEND PROPERTY LABELS "vulkan")
 
+# Label tests that work with MLIR
+set_property(TEST
+  "runtime/clCreateKernelsInProgram"
+  "runtime/clCreateSubDevices"
+  "runtime/clFinish"
+  "runtime/test_command_buffer"
+  "runtime/test_command_buffer_multi_device"
+  "runtime/test_subbuffers"
+  APPEND PROPERTY LABELS "mlir")
+
 if (ENABLE_TCE)
     # Label tests that work with Almaif (with compiler) backend
     set_property(TEST

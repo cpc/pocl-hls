@@ -45,6 +45,7 @@ public:
 
   virtual void loadProgramToDevice(almaif_kernel_data_s *KernelData,
                                    cl_kernel Kernel, _cl_command_node *Command);
+  virtual void unloadProgram() {}
 
   AlmaIFRegion *ControlMemory;
   AlmaIFRegion *InstructionMemory;
@@ -76,6 +77,10 @@ public:
   virtual void discoverDeviceParameters();
 
   virtual bool isDBDevice() { return false; }
+  virtual bool isEmulationDevice() { return false; }
+  // Returns false when the device has no loaded bitstream yet (e.g. deferred
+  // xclbin load). Hardware register accesses should be skipped in this state.
+  virtual bool isHardwareReady() { return true; }
 
   // Allocate buffer from AlmaIFDevice's DataMemory or ExternalMemory
   virtual cl_int allocateBuffer(pocl_mem_identifier *P, size_t Size);

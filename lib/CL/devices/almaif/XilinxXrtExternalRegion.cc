@@ -47,6 +47,9 @@ XilinxXrtExternalRegion::XilinxXrtExternalRegion(size_t Address,
 
   XilinxXrtDeviceHandle_ = Device;
 }
+void XilinxXrtExternalRegion::setDeviceHandle(void *handle) {
+  XilinxXrtDeviceHandle_ = (xrt::device *)handle;
+}
 
 void XilinxXrtExternalRegion::freeBuffer(pocl_mem_identifier *P) {
   delete (xrt::bo *)(P->mem_ptr);
@@ -100,7 +103,7 @@ void XilinxXrtExternalRegion::CopyFromMMAP(void *Destination,
   assert(Offset < Size_ && "Attempt to access data outside XRT memory");
 
   xrt::bo *b = (xrt::bo *)(SrcMemId->mem_ptr);
-  assert(b != XRT_NULL_HANDLE && "No kernel handle?");
+  assert(b != XRT_NULL_HANDLE && "Buff handle null");
   b->sync(XCL_BO_SYNC_BO_FROM_DEVICE, Bytes, Offset);
   b->read(Destination, Bytes, Offset);
 }

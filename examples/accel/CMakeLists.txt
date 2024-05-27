@@ -111,21 +111,27 @@ endif ()
       list(APPEND PARAMS "--data-start=${data_start}")
     endif()
     add_custom_command(OUTPUT firmwares/${core_name}.tpef
-      COMMAND tcecc -o3 ${PARAMS} -g -a ${ADF} -o ${TPEF} firmware.c
-      COMMAND generatebits -e tta_core -f bin2n -p ${TPEF} ${ADF}
-      COMMAND tcedisasm -n ${ADF} ${TPEF}
+      COMMAND ${CMAKE_COMMAND} -E env
+        "LD_LIBRARY_PATH=${OPENASIP_LLVM_DIR}/lib"
+        "PATH=${OPENASIP_LLVM_DIR}/bin:$ENV{PATH}"
+        oacc -o3 ${PARAMS} -g -a ${ADF} -o ${TPEF} firmware.c
+      COMMAND ${CMAKE_COMMAND} -E env "LD_LIBRARY_PATH=${OPENASIP_LLVM_DIR}/lib"
+        generatebits -e tta_core -f bin2n -p ${TPEF} ${ADF}
+      COMMAND ${CMAKE_COMMAND} -E env "LD_LIBRARY_PATH=${OPENASIP_LLVM_DIR}/lib"
+        tcedisasm -n ${ADF} ${TPEF}
       COMMAND mv ${core_name}.img ${CMAKE_CURRENT_BINARY_DIR}/firmware_imgs/
       DEPENDS ${ADF} ${CMAKE_CURRENT_SOURCE_DIR}/firmware.c
       COMMENT "Compiling ${core_name} firmware with params ${PARAMS}")
     add_custom_target(${core_name}_firmware ALL DEPENDS firmwares/${core_name}.tpef)
-    
-    
+
     add_custom_command(OUTPUT test_${core_name}/rtl_${core_name}
       COMMAND rm -rf test_${core_name}/rtl_${core_name}
-      COMMAND generateprocessor -t --prefer-generation -o test_${core_name}/rtl_${core_name} -e tta_core --icd-arg-list=debugger:minimal
-      --hdb-list=generate_lsu_32.hdb,generate_rf_iu.hdb,xilinx_series7.hdb,generate_base32.hdb
-      -f onchip -d onchip -g AlmaIFIntegrator -p ${TPEF} ${ADF}
-      COMMAND generatebits -x test_${core_name}/rtl_${core_name} -e tta_core ${ADF}
+      COMMAND ${CMAKE_COMMAND} -E env "LD_LIBRARY_PATH=${OPENASIP_LLVM_DIR}/lib"
+        generateprocessor -t --prefer-generation -o test_${core_name}/rtl_${core_name} -e tta_core --icd-arg-list=debugger:minimal
+        --hdb-list=generate_lsu_32.hdb,generate_rf_iu.hdb,xilinx_series7.hdb,generate_base32.hdb
+        -f onchip -d onchip -g AlmaIFIntegrator -p ${TPEF} ${ADF}
+      COMMAND ${CMAKE_COMMAND} -E env "LD_LIBRARY_PATH=${OPENASIP_LLVM_DIR}/lib"
+        generatebits -x test_${core_name}/rtl_${core_name} -e tta_core ${ADF}
       DEPENDS ${ADF})
     add_custom_target(${core_name}_rtl ALL DEPENDS test_${core_name}/rtl_${core_name})
 

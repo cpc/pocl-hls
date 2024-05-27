@@ -197,7 +197,7 @@ AlmaIFBitstreamDatabaseManager::AlmaIFBitstreamDatabaseManager(
       char *BitstreamDatabaseIndex = NULL;
       pocl_read_file(BitstreamDatabaseIndexPath.c_str(),
                      &BitstreamDatabaseIndex, &Size);
-      POCL_MSG_PRINT_ALMAIF("Read file size=%lld\n", Size);
+      POCL_MSG_PRINT_ALMAIF("Read file size=%" PRIu64 "\n", Size);
 
       POCL_MSG_PRINT_ALMAIF("DATABASE FILE %s:\n",
                             BitstreamDatabaseIndexPath.c_str());
@@ -230,7 +230,7 @@ AlmaIFBitstreamDatabaseManager::string2DeviceTypeEnum(const std::string &Str) {
       return Conversion[j].Val;
     } else {
       POCL_MSG_PRINT_ALMAIF(
-          "String-to-enum. String:%s, comparing:%s, lengths:%d,%d\n",
+          "String-to-enum. String:%s, comparing:%s, lengths:%lu,%lu\n",
           Conversion[j].Str.c_str(), StringToConvert.c_str(),
           Conversion[j].Str.length(), StringToConvert.length());
     }

@@ -28,6 +28,10 @@
 #include <mlir/InitAllExtensions.h>
 #include <mlir/InitAllPasses.h>
 #include <mlir/Tools/mlir-opt/MlirOptMain.h>
+#ifdef ENABLE_SCALEHLS
+#include "scalehls/InitAllDialects.h"
+#include "scalehls/InitAllPasses.h"
+#endif
 
 #include "pocl/Dialect/Dialect.hh"
 #include "pocl/Transforms/Passes.hh"
@@ -36,10 +40,15 @@ int main(int argc, char **argv) {
   mlir::DialectRegistry Registry;
 
   mlir::registerAllDialects(Registry);
-  mlir::registerAllPasses();
   mlir::registerAllExtensions(Registry);
 
   Registry.insert<mlir::pocl::PoclDialect>();
+#ifdef ENABLE_SCALEHLS
+  mlir::scalehls::registerAllDialects(Registry);
+  mlir::scalehls::registerAllPasses();
+#else
+  mlir::registerAllPasses();
+#endif
   mlir::pocl::registerPoclTransformsPasses();
 
   return mlir::asMainReturnCode(

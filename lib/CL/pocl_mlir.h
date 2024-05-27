@@ -65,7 +65,8 @@ int poclMlirGenerateLlvmFunction (unsigned DeviceI,
                                   cl_kernel Kernel,
                                   _cl_command_node *Command,
                                   int Specialize,
-                                  const char *Cachedir);
+                                  const char *Cachedir,
+                                  int hasArgBufferLauncher);
 
 POCL_EXPORT
 void poclDestroyMlirModule (void *Module);
@@ -81,6 +82,29 @@ int poclMlirGenerateWorkgroupFunctionNowrite (unsigned DeviceI,
 
 void poclMlirRegisterDialects (PoclLLVMContextData *Data);
 
+POCL_EXPORT
+int
+pocl_mlir_generate_cmd_buffer_function (cl_device_id device,
+                                        cl_command_buffer_khr command_buffer,
+                                        const char *kernel_name_suffix);
+
+POCL_EXPORT
+cl_int pocl_mlir_free_command_buffer (cl_device_id device,
+                                      cl_command_buffer_khr command_buffer);
+
+POCL_EXPORT
+int pocl_mlir_generate_hls_function (unsigned DeviceI,
+                                     cl_device_id Device,
+                                     cl_kernel Kernel,
+                                     _cl_command_node *Command,
+                                     int Specialize,
+                                     const char *cachedir);
+POCL_EXPORT
+cl_int pocl_mlir_update_mutable_args_of_config (
+  const cl_mutable_dispatch_config_khr *cfg,
+  cl_command_buffer_khr command_buffer,
+  unsigned num_configs,
+  const void **configs);
 #ifdef __cplusplus
 }
 #endif

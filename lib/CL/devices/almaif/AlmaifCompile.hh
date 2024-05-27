@@ -42,8 +42,6 @@ typedef struct compilation_data_s {
 
   char *build_hash;
 
-  chunk_info_t *pocl_context;
-
   /* device-specific callbacks */
   int (*compile_kernel)(_cl_command_node *cmd, cl_kernel kernel,
                         cl_device_id device, int specialize);
@@ -66,8 +64,7 @@ typedef struct almaif_kernel_data_s {
   size_t dmem_img_size;
   size_t imem_img_size;
   size_t pmem_img_size;
-  uint32_t kernel_address;
-  uint32_t kernel_md_offset;
+  uint64_t kernel_address;
 } almaif_kernel_data_t;
 
 int pocl_almaif_compile_init(unsigned j, cl_device_id dev,

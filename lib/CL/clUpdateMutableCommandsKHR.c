@@ -23,7 +23,10 @@
 
 #include "pocl_cl.h"
 #include "pocl_cmdbuf.h"
+#include "pocl_mlir.h"
+#include "pocl_shared.h"
 #include "pocl_util.h"
+#include "utlist.h"
 
 CL_API_ENTRY cl_int
 POname (clUpdateMutableCommandsKHR) (
@@ -154,8 +157,87 @@ POname (clUpdateMutableCommandsKHR) (
       num_groups[2] = (work_dim > 2) ? (global_work_size[2] / local_work_size[2]) : 1;
       memcpy (cfg->command->command.run.pc.num_groups,
               num_groups, copy_size);
+
+      if (pocl_get_bool_option ("POCL_MLIR_DISABLE_CMD_BUFFER_FUSION", 0))
+        {
+          // Update the hidden num_groups argument
+          int has_mutable_global_size
+            = cfg->command->command.run.updatable_fields
+              & CL_MUTABLE_DISPATCH_GLOBAL_SIZE_KHR;
+          if (has_mutable_global_size)
+            {
+              // Figure out the first argument index of the command in the
+              // megaKernel.
+              _cl_command_node *cmd;
+              int cmd_idx = 0;
+              LL_FOREACH (command_buffer->cmds, cmd)
+                {
+                  if (cmd->type != CL_COMMAND_NDRANGE_KERNEL)
+                    continue;
+                  if (cmd == cfg->command)
+                    break;
+                  cmd_idx++;
+                }
+              for (int dim = 0; dim < 3; dim++)
+                {
+                  int num_groups_arg_index
+                    = command_buffer->fake_single_kernel_cmd_buffers[cmd_idx]
+                        ->num_of_settable_arguments[0]
+                      - 3 + dim;
+                  pocl_argument *num_groups_arg
+                    = &command_buffer->fake_single_kernel_cmd_buffers[cmd_idx]
+                         ->megaKernel->dyn_arguments[num_groups_arg_index];
+                  memcpy (num_groups_arg->value, &num_groups[dim],
+                          num_groups_arg->size);
+                }
+            }
+        }
+      else
+        {
+
+          // Update the hidden num_groups argument
+          int has_mutable_global_size
+            = cfg->command->command.run.updatable_fields
+              & CL_MUTABLE_DISPATCH_GLOBAL_SIZE_KHR;
+          if (has_mutable_global_size)
+            {
+              // Figure out the first argument index of the command in the
+              // megaKernel.
+              int first_arg_index_of_cmd_in_megaKernel = 0;
+              _cl_command_node *cmd;
+              int cmd_idx = 0;
+              LL_FOREACH (command_buffer->cmds, cmd)
+                {
+                  if (cmd->type != CL_COMMAND_NDRANGE_KERNEL)
+                    continue;
+                  if (cmd == cfg->command)
+                    break;
+                  first_arg_index_of_cmd_in_megaKernel
+                    += command_buffer->num_of_settable_arguments[cmd_idx];
+                  cmd_idx++;
+                }
+              for (int dim = 0; dim < 3; dim++)
+                {
+                  int num_groups_arg_index
+                    = first_arg_index_of_cmd_in_megaKernel
+                      + command_buffer->num_of_settable_arguments[cmd_idx] - 3
+                      + dim;
+                  pocl_argument *num_groups_arg
+                    = &command_buffer->megaKernel
+                         ->dyn_arguments[num_groups_arg_index];
+                  memcpy (num_groups_arg->value, &num_groups[dim],
+                          num_groups_arg->size);
+                }
+            }
+        }
       POCL_MSG_PRINT_INFO ("UPDATE MUTABLE CMD: NEW NUM_GROUPS %zu %zu %zu\n",
-                     num_groups[0], num_groups[1], num_groups[2]);
+                           num_groups[0], num_groups[1], num_groups[2]);
+#ifdef ENABLE_MLIR
+      cl_int kernArgStatus = pocl_mlir_update_mutable_args_of_config (
+        cfg, command_buffer, num_configs, configs);
+      if (kernArgStatus != CL_SUCCESS)
+        return kernArgStatus;
+#endif
     }
 
   return CL_SUCCESS;

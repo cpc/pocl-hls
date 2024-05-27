@@ -46,7 +46,8 @@ public:
   ~DBDevice();
 
   virtual void loadProgramToDevice(almaif_kernel_data_s *KernelData,
-                                   cl_kernel Kernel, _cl_command_node *Command);
+                                   cl_kernel Kernel,
+                                   _cl_command_node *Command) override;
   void printMemoryDump();
   void writeDataToDevice(pocl_mem_identifier *DstMemId,
                          const char *__restrict__ const Src, size_t Size,
@@ -64,7 +65,7 @@ public:
   virtual void programBIKernelBitstream(cl_dbk_id_exp BikID);
 
   virtual std::vector<cl_dbk_id_exp> supportedBuiltinKernels();
-  virtual void discoverDeviceParameters();
+  virtual void discoverDeviceParameters() override;
   int pipeCount() override;
 
   bool isDBDevice() override { return true; }

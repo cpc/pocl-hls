@@ -29,7 +29,6 @@
 #include "pocl/Transforms/Passes.hh"
 #include "llvm/ADT/STLExtras.h"
 
-#include "pocl_debug.h"
 #include "pocl_llvm_api.h"
 
 namespace {

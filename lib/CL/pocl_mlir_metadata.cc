@@ -97,6 +97,10 @@ int poclMlirGetKernelsMetadata(cl_program Program, unsigned DeviceI) {
               Meta->arg_info[I].address_qualifier = CL_KERNEL_ARG_ADDRESS_LOCAL;
           Meta->arg_info[I].access_qualifier = CL_KERNEL_ARG_ACCESS_READ_WRITE;
           Meta->arg_info[I].type_size = sizeof(void *);
+        } else if (mlir::isa<mlir::IndexType>(ArgInfo)) {
+          Meta->arg_info[I].type = POCL_ARG_TYPE_NONE;
+          Meta->arg_info[I].type_size = sizeof(size_t);
+          Meta->arg_info[I].type_name = strdup("size_t");
         } else {
           Meta->arg_info[I].type = POCL_ARG_TYPE_NONE;
           auto SizeBits = ArgInfo.getIntOrFloatBitWidth();

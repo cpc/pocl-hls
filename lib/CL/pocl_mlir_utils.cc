@@ -76,4 +76,8 @@ void poclMlirRegisterDialects(PoclLLVMContextData *Data) {
   mlir::vector::registerConvertVectorToLLVMInterface(Registry);
 
   Data->MLIRContext->appendDialectRegistry(Registry);
+
+  // Func dialect must be loaded to work around a weird TypeID issue, likely
+  // related to visibility-hidden
+  Data->MLIRContext->loadDialect<mlir::func::FuncDialect>();
 }

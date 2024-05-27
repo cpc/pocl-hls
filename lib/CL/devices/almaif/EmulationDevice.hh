@@ -52,6 +52,9 @@ class EmulationDevice : public AlmaIFDevice {
 public:
   EmulationDevice();
   ~EmulationDevice();
+  bool isEmulationDevice() override { return true; }
+  void loadProgramToDevice(almaif_kernel_data_s *KernelData, cl_kernel Kernel,
+                           _cl_command_node *Command) override;
 
 private:
   struct emulation_data_t E;

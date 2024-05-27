@@ -399,7 +399,8 @@ pocl_init_mem_region (memory_region_t *region, memory_address_t start,
   int i;
   BA_INIT_LOCK (region->lock);
 
-  region->strategy = BALLOCS_WASTEFUL;
+  // region->strategy = BALLOCS_WASTEFUL;
+  region->strategy = BALLOCS_TIGHT;
   region->chunks = NULL;
   region->free_chunks = NULL;
   region->alignment = 64;

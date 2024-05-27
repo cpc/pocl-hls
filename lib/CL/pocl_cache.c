@@ -54,6 +54,8 @@
 #define POCL_PROGRAM_BC_FILENAME "/program.bc"
 #define POCL_PROGRAM_SPV_FILENAME "/program.spv"
 #define POCL_PROGRAM_MLIR_FILENAME "/program.mlir"
+#define POCL_PROGRAM_XCLBIN_FILENAME "/program.xclbin"
+#define POCL_PROGRAM_IMG_FILENAME "/firmware.img"
 
 static char cache_topdir[POCL_MAX_PATHNAME_LENGTH];
 static char tempfile_pattern[POCL_MAX_PATHNAME_LENGTH];
@@ -119,6 +121,85 @@ pocl_cache_program_mlir_path (char *program_bc_path,
 {
   program_device_dir (program_bc_path, program, device_i,
                       POCL_PROGRAM_MLIR_FILENAME);
+}
+
+void
+pocl_cache_program_xclbin_path (char *program_bc_path,
+                                cl_program program,
+                                unsigned device_i)
+{
+  program_device_dir (program_bc_path, program, device_i,
+                      POCL_PROGRAM_XCLBIN_FILENAME);
+}
+
+void
+pocl_cache_program_img_path (char *program_bc_path,
+                             cl_program program,
+                             unsigned device_i)
+{
+  program_device_dir (program_bc_path, program, device_i,
+                      POCL_PROGRAM_IMG_FILENAME);
+}
+
+void
+pocl_cache_set_cmd_buffer_hash (cl_command_buffer_khr command_buffer)
+{
+  _cl_command_node *cmd;
+  cl_program cmd_buffer_program = command_buffer->megaProgram;
+  assert (cmd_buffer_program);
+  int cmd_count = 0;
+  LL_FOREACH (command_buffer->cmds, cmd)
+    {
+      if (cmd->type != CL_COMMAND_NDRANGE_KERNEL)
+        {
+          POCL_MSG_WARN (
+            "Only NDRange cmds implemented for MLIR command buffers\n");
+          return;
+        }
+      cmd_count++;
+    }
+  char *concat_programs
+    = (char *)malloc (cmd_count * (SHA1_DIGEST_SIZE * 2 + 1));
+  concat_programs[0] = '\0';
+  LL_FOREACH (command_buffer->cmds, cmd)
+    {
+      unsigned device_i = cmd->program_device_i;
+      strncat (
+        concat_programs,
+        (const char *)cmd->command.run.kernel->program->build_hash[device_i],
+        SHA1_DIGEST_SIZE);
+    }
+
+  SHA1_CTX hash_ctx;
+  static const char *builtin_seed = POCL_VERSION_BASE POCL_BUILD_TIMESTAMP
+#ifdef ENABLE_LLVM
+    LLVM_VERSION POCL_KERNELLIB_SHA1
+#endif
+    ;
+  pocl_SHA1_Init (&hash_ctx);
+  pocl_SHA1_Update (&hash_ctx, (uint8_t *)builtin_seed, strlen (builtin_seed));
+
+  size_t source_len = strnlen (concat_programs, SHA1_DIGEST_SIZE * 2 + 1);
+  assert (source_len > 0);
+  pocl_SHA1_Update (&hash_ctx, (uint8_t *)concat_programs, source_len);
+
+  uint8_t digest[SHA1_DIGEST_SIZE];
+  pocl_SHA1_Final (&hash_ctx, digest);
+
+  unsigned device_i = 0;
+  cmd_buffer_program->build_hash
+    = (SHA1_digest_t *)calloc (1, sizeof (SHA1_digest_t));
+  unsigned char *hashstr = cmd_buffer_program->build_hash[0];
+  for (int i = 0; i < SHA1_DIGEST_SIZE; i++)
+    {
+      *hashstr++ = (digest[i] & 0x0F) + 65;
+      *hashstr++ = ((digest[i] & 0xF0) >> 4) + 65;
+    }
+  *hashstr = 0;
+
+  cmd_buffer_program->build_hash[0][2] = '/';
+
+  free (concat_programs);
 }
 
 /**

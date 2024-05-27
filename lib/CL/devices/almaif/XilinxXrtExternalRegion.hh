@@ -40,6 +40,8 @@ public:
                     size_t Bytes, size_t Offset);
   void CopyInMem(size_t Source, size_t Destination, size_t Bytes);
 
+  void setDeviceHandle(void *handle);
+
   // Returns the offset of the allocated pointer in the Xrt address space
   // used by the kernel
   uint64_t pointerDeviceOffset(pocl_mem_identifier *P);

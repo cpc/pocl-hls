@@ -50,7 +50,7 @@ public:
   virtual void CopyInMem(size_t source, size_t destination,
                          size_t bytes) override;
 
-  virtual void initRegion(const std::string &init_file);
+  virtual void initRegion(const std::string &init_file) override;
 
 protected:
   MMAPRegion();

@@ -23,9 +23,12 @@
 
 #include "EmulationDevice.hh"
 
-#include "EmulationRegion.hh"
+#include "AlmaifCompile.hh"
 #include "AlmaifShared.hh"
+#include "EmulationRegion.hh"
+#include "common.h"
 #include "pocl_timing.h"
+#include "pocl_workgroup_func.h"
 
 #include <iostream>
 #include <unistd.h>
@@ -40,6 +43,8 @@ EmulationDevice::EmulationDevice() {
   // in the initial mapping of the accelerator
   E.emulating_address = calloc(1, EMULATING_MAX_SIZE);
   assert(E.emulating_address != NULL && "Emulating calloc failed\n");
+  POCL_MSG_PRINT_ALMAIF("Allocated emulation region from: %p\n",
+                        E.emulating_address);
 
   // Create emulator thread
   E.emulate_exit_called = 0;
@@ -190,101 +195,122 @@ void *emulate_almaif(void *E_void) {
           packet_loc);
       POCL_MSG_PRINT_ALMAIF("almaif emulate: kernargs are at 0x%zx\n",
                            packet->kernarg_address);
-      // Find the 5 pointers
-      // Pointer size can be different on different systems
-      // Also the endianness might need some attention in the real case.
-
-      union args_u {
-        uint32_t *ptrs[5];
-        uint8_t values[5 * PTR_SIZE];
-      } args;
-      for (int i = 0; i < 5; i++) {
-        for (unsigned k = 0; k < PTR_SIZE; k++) {
-          args.values[PTR_SIZE * i + k] =
-              *(uint8_t *)(packet->kernarg_address + PTR_SIZE * i + k);
-        }
-      }
-      uint32_t *arg0 = args.ptrs[0];
-      uint32_t *arg1 = args.ptrs[1];
-      uint32_t *arg2 = args.ptrs[2];
-      uint32_t *arg3 = args.ptrs[3];
-      uint32_t *arg4 = args.ptrs[4];
-
-      POCL_MSG_PRINT_ALMAIF(
-          "almaif emulate: FOUND args arg0=%p, arg1=%p, arg2=%p\n", (void*)arg0,
-          (void*) arg1, (void*)arg2);
 
       // Check how many dimensions are in use, and set the unused ones to 1.
       int dim_x = packet->grid_size_x;
       int dim_y = (packet->dimensions >= 2) ? (packet->grid_size_y) : 1;
       int dim_z = (packet->dimensions == 3) ? (packet->grid_size_z) : 1;
 
-      int red_count = 0;
-      uint8_t min = 255;
-      uint8_t max = 0;
-      uint32_t minlocx = 0, minlocy = 0, maxlocx = 0, maxlocy = 0;
-      POCL_MSG_PRINT_ALMAIF(
-          "almaif emulate: Parsing done: starting loops with dims (%i,%i,%i)\n",
-          dim_x, dim_y, dim_z);
-      for (int z = 0; z < dim_z; z++) {
-        for (int y = 0; y < dim_y; y++) {
-          for (int x = 0; x < dim_x; x++) {
-            // Linearize grid
-            int idx = z * dim_y * dim_x + dim_x * y + x;
-            // Do the operation based on the kernel_object (integer id)
-            switch (packet->kernel_object) {
-            case (POCL_CDBI_COPY_I8):
-              arg1[idx] = arg0[idx];
-              break;
-            case (POCL_CDBI_ADD_I32):
-              arg2[idx] = arg0[idx] + arg1[idx];
-              break;
-            case (POCL_CDBI_MUL_I32):
-              arg2[idx] = arg0[idx] * arg1[idx];
-              break;
-            case (POCL_CDBI_COUNTRED): {
-              uint32_t pixel = arg0[idx];
-              uint8_t pixel_r = pixel & 0xFF;
-              if (pixel_r > 100) {
-                red_count++;
-              }
-            } break;
-            case (POCL_CDBI_ABS_F32): {
-              float *arg0f = (float *)arg0;
-              float *arg1f = (float *)arg1;
-              arg1f[idx] = std::abs(arg0f[idx]);
-            } break;
-            case (POCL_CDBI_OPENVX_MINMAXLOC_R1_U8): {
-              uint8_t pixel = ((uint8_t*)arg0)[idx];
-              if (pixel < min) {
-                  min = pixel;
-                  minlocx = x;
-                  minlocy = y;
-              }
-              if (pixel > max) {
-                  max = pixel;
-                  maxlocx = x;
-                  maxlocy = y;
-              }
-            } break;
+      if (packet->kernel_object == POCL_CDBI_JIT_COMPILER) {
+        pocl_workgroup_func *kernel_func_ptr =
+            (pocl_workgroup_func *)cmd->kernel_func_ptr;
+        POCL_MSG_PRINT_ALMAIF("Found kernel func ptr:%p\n", kernel_func_ptr);
+        pocl_context *pc = (pocl_context *)packet->pocl_context32b;
+        POCL_MSG_PRINT_ALMAIF(
+            "Found pocl context %p with num groups %lu,%lu,%lu\n", pc,
+            pc->num_groups[0], pc->num_groups[1], pc->num_groups[2]);
+        for (int z = 0; z < pc->num_groups[2]; z++) {
+          for (int y = 0; y < pc->num_groups[1]; y++) {
+            for (int x = 0; x < pc->num_groups[0]; x++) {
+              POCL_MSG_PRINT_ALMAIF("Calling pocl workgroup function now\n");
+              ((pocl_workgroup_func)kernel_func_ptr)(
+                  (uchar *)packet->kernarg_address,
+                  (uchar *)packet->pocl_context32b, x, y, z);
             }
           }
         }
-      }
-      if (packet->kernel_object == POCL_CDBI_LEDBLINK) {
-        std::cout << "Emulation blinking " << dim_x << " led(s) at interval "
-                  << arg0[0] << " us " << arg1[0] << " times" << std::endl;
-      }
-      if (packet->kernel_object == POCL_CDBI_COUNTRED) {
-        arg1[0] = red_count;
-      }
-      if (packet->kernel_object == POCL_CDBI_OPENVX_MINMAXLOC_R1_U8) {
-        arg1[0] = min;
-        arg2[0] = max;
-        arg3[0] = minlocx;
-        arg3[1] = minlocy;
-        arg4[0] = maxlocx;
-        arg4[1] = maxlocy;
+      } else {
+        // Find the 5 pointers
+        // Pointer size can be different on different systems
+        // Also the endianness might need some attention in the real case.
+
+        union args_u {
+          uint32_t *ptrs[5];
+          uint8_t values[5 * PTR_SIZE];
+        } args;
+        for (int i = 0; i < 5; i++) {
+          for (unsigned k = 0; k < PTR_SIZE; k++) {
+            args.values[PTR_SIZE * i + k] =
+                *(uint8_t *)(packet->kernarg_address + PTR_SIZE * i + k);
+          }
+        }
+        uint32_t *arg0 = args.ptrs[0];
+        uint32_t *arg1 = args.ptrs[1];
+        uint32_t *arg2 = args.ptrs[2];
+        uint32_t *arg3 = args.ptrs[3];
+        uint32_t *arg4 = args.ptrs[4];
+
+        POCL_MSG_PRINT_ALMAIF(
+            "almaif emulate: FOUND args arg0=%p, arg1=%p, arg2=%p\n",
+            (void *)arg0, (void *)arg1, (void *)arg2);
+
+        int red_count = 0;
+        uint8_t min = 255;
+        uint8_t max = 0;
+        uint32_t minlocx, minlocy, maxlocx, maxlocy;
+        POCL_MSG_PRINT_ALMAIF("almaif emulate: Parsing done: starting loops "
+                              "with dims (%i,%i,%i)\n",
+                              dim_x, dim_y, dim_z);
+        for (int z = 0; z < dim_z; z++) {
+          for (int y = 0; y < dim_y; y++) {
+            for (int x = 0; x < dim_x; x++) {
+              // Linearize grid
+              int idx = z * dim_y * dim_x + dim_x * y + x;
+              // Do the operation based on the kernel_object (integer id)
+              switch (packet->kernel_object) {
+              case (POCL_CDBI_COPY_I8):
+                arg1[idx] = arg0[idx];
+                break;
+              case (POCL_CDBI_ADD_I32):
+                arg2[idx] = arg0[idx] + arg1[idx];
+                break;
+              case (POCL_CDBI_MUL_I32):
+                arg2[idx] = arg0[idx] * arg1[idx];
+                break;
+              case (POCL_CDBI_COUNTRED): {
+                uint32_t pixel = arg0[idx];
+                uint8_t pixel_r = pixel & 0xFF;
+                if (pixel_r > 100) {
+                  red_count++;
+                }
+              } break;
+              case (POCL_CDBI_ABS_F32): {
+                float *arg0f = (float *)arg0;
+                float *arg1f = (float *)arg1;
+                arg1f[idx] = std::abs(arg0f[idx]);
+              } break;
+              case (POCL_CDBI_OPENVX_MINMAXLOC_R1_U8): {
+                uint8_t pixel = ((uint8_t *)arg0)[idx];
+                if (pixel < min) {
+                  min = pixel;
+                  minlocx = x;
+                  minlocy = y;
+                }
+                if (pixel > max) {
+                  max = pixel;
+                  maxlocx = x;
+                  maxlocy = y;
+                }
+              } break;
+              }
+            }
+          }
+        }
+        if (packet->kernel_object == POCL_CDBI_LEDBLINK) {
+          std::cout << "Emulation blinking " << dim_x << " led(s) at interval "
+                    << arg0[0] << " us " << arg1[0] << " times" << std::endl;
+        }
+        if (packet->kernel_object == POCL_CDBI_COUNTRED) {
+          arg1[0] = red_count;
+        }
+        if (packet->kernel_object == POCL_CDBI_OPENVX_MINMAXLOC_R1_U8) {
+          arg1[0] = min;
+          arg2[0] = max;
+          arg3[0] = minlocx;
+          arg3[1] = minlocy;
+          arg4[0] = maxlocx;
+          arg4[1] = maxlocy;
+        }
       }
 
       POCL_MSG_PRINT_ALMAIF("almaif emulate: Kernel done\n");
@@ -299,4 +325,12 @@ void *emulate_almaif(void *E_void) {
   }
 
   return NULL;
+}
+
+void EmulationDevice::loadProgramToDevice(almaif_kernel_data_s *KernelData,
+                                          cl_kernel Kernel,
+                                          _cl_command_node *Command) {
+  pocl_check_kernel_dlhandle_cache(Command, CL_TRUE, CL_TRUE);
+  KernelData->kernel_address = (uint64_t)Command->command.run.wg;
+  return;
 }

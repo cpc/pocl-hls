@@ -31,6 +31,7 @@ set(MLIR_KERNELLIB_SOURCES
 "mlir/get_global_offset.cl"
 "mlir/get_global_size.cl"
 "mlir/math.mlir"
+"mlir/barrier.mlir"
 )
 
 set(DEVICE_CL_FLAGS "-D__OPENCL_VERSION__=120 -DPOCL_DEVICE_ADDRESS_BITS=64 -fclangir -emit-cir --target=spirv64")

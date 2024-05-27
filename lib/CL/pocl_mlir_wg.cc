@@ -53,6 +53,9 @@
 #include <mlir/Transforms/DialectConversion.h>
 #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
 #include <mlir/Transforms/Passes.h>
+#ifdef ENABLE_SCALEHLS
+#include "scalehls/Transforms/Passes.h"
+#endif
 
 #include "pocl/Transforms/Passes.hh"
 
@@ -66,13 +69,15 @@
 #include "pocl_mlir_file_util.hh"
 #include "pocl_mlir_passes.hh"
 
-static void generateLlvmFunctionNowrite(mlir::OwningOpRef<mlir::ModuleOp> &Mod,
-                                        mlir::MLIRContext *MLIRContext) {
+static int generateLlvmFunctionNowrite(mlir::OwningOpRef<mlir::ModuleOp> &Mod,
+                                       mlir::MLIRContext *MLIRContext,
+                                       bool hasArgBufferLauncher) {
 
   mlir::PassManager PMLower(MLIRContext);
   PMLower.addPass(mlir::pocl::createConvertAffineParallelToAffineForPass());
   if (mlir::failed(PMLower.run(*Mod))) {
     POCL_MSG_PRINT_LLVM("Failed lowering the affine parallel to affine for\n");
+    return CL_FAILED;
   }
 
   pocl::mlir::runAffinePasses(Mod, true);
@@ -102,23 +107,32 @@ static void generateLlvmFunctionNowrite(mlir::OwningOpRef<mlir::ModuleOp> &Mod,
   PMLLVM.addPass(mlir::pocl::createStripMemSpacesPass());
   PMLLVM.addPass(mlir::createConvertToLLVMPass());
   PMLLVM.addPass(mlir::createReconcileUnrealizedCastsPass());
-  PMLLVM.addPass(mlir::pocl::createConvertMemrefToLLVMKernelArgsPass());
+  mlir::pocl::ConvertMemrefToLLVMKernelArgsOptions MemrefToLLVMOpts;
+  MemrefToLLVMOpts.hasArgBufferLauncher = hasArgBufferLauncher;
+  PMLLVM.addPass(
+      mlir::pocl::createConvertMemrefToLLVMKernelArgsPass(MemrefToLLVMOpts));
 
   if (mlir::failed(PMLLVM.run(*Mod))) {
     POCL_MSG_PRINT_LLVM("Failed running the MLIR-To-LLVM IR lowering passes\n");
+    return CL_FAILED;
   }
-  return;
+  return CL_SUCCESS;
 }
 
 int pocl::mlir::runAffinePasses(mlir::OwningOpRef<mlir::ModuleOp> &Mod,
-                                bool RaiseAffine) {
+                                bool RaiseAffine, bool Inline) {
   mlir::GreedyRewriteConfig CanonicalizerConfig;
   CanonicalizerConfig.setMaxIterations(400);
   mlir::PassManager PMAffine(Mod->getContext());
   mlir::OpPassManager &OptPmAffine = PMAffine.nest<mlir::func::FuncOp>();
   PMAffine.addPass(mlir::createCanonicalizerPass());
-  PMAffine.addPass(mlir::createCanonicalizerPass());
-  PMAffine.addPass(mlir::createInlinerPass());
+  if (Inline) {
+    PMAffine.addPass(mlir::createLowerAffinePass());
+    PMAffine.addPass(mlir::createInlinerPass());
+  }
+  if (RaiseAffine) {
+    PMAffine.addPass(mlir::pocl::replaceAffineCFGPass());
+  }
   PMAffine.addPass(mlir::createLoopInvariantCodeMotionPass());
   PMAffine.addNestedPass<mlir::func::FuncOp>(
       mlir::affine::createLoopCoalescingPass());
@@ -165,6 +179,7 @@ static int runPoclPasses(mlir::OwningOpRef<mlir::ModuleOp> &Mod,
   mlir::OpPassManager &OptPm = Pm.nest<mlir::func::FuncOp>();
   Pm.addPass(mlir::createCanonicalizerPass());
   Pm.addPass(mlir::createInlinerPass());
+  Pm.addPass(mlir::pocl::createMem2RegPass());
   OptPm.addPass(mlir::createCanonicalizerPass(CanonicalizerConfig, {}, {}));
   OptPm.addPass(mlir::createCSEPass());
   OptPm.addPass(mlir::createMem2Reg());
@@ -180,13 +195,17 @@ static int runPoclPasses(mlir::OwningOpRef<mlir::ModuleOp> &Mod,
   OptPm.addPass(mlir::createMem2Reg());
   OptPm.addPass(mlir::createCanonicalizerPass(CanonicalizerConfig, {}, {}));
   OptPm.addPass(mlir::createLoopInvariantCodeMotionPass());
-  OptPm.addPass(mlir::createCanonicalizerPass(CanonicalizerConfig, {}, {}));
+  mlir::pocl::DistributeBarriersOptions barrierMethod = {"distribute.mincut"};
+  Pm.addPass(mlir::pocl::createDistributeBarriersPass(barrierMethod));
   OptPm.addPass(mlir::createCSEPass());
+  OptPm.addPass(mlir::createCanonicalizerPass(CanonicalizerConfig, {}, {}));
+  Pm.addPass(mlir::pocl::createMem2RegPass());
   OptPm.addPass(mlir::createMem2Reg());
   Pm.addPass(mlir::createSymbolDCEPass());
   Pm.addPass(mlir::createCanonicalizerPass());
   if (mlir::failed(Pm.run(*Mod))) {
     POCL_MSG_PRINT_LLVM("Failed running the MLIR compiler passes\n");
+    Mod->dump();
     return CL_FAILED;
   }
   if (mlir::failed(mlir::verify(*Mod))) {
@@ -213,10 +232,8 @@ static int runPoclPasses(mlir::OwningOpRef<mlir::ModuleOp> &Mod,
 
 int poclMlirGenerateStandardWorkgroupFunctionNowrite(
     cl_kernel Kernel, _cl_command_node *Command,
-    mlir::OwningOpRef<mlir::ModuleOp> &Module, int Specialize) {
-  cl_context Ctx = Kernel->context;
-  PoclLLVMContextData *PoCLLLVMContext =
-      (PoclLLVMContextData *)Ctx->llvm_context_data;
+    mlir::OwningOpRef<mlir::ModuleOp> &Module, mlir::MLIRContext *MLIRContext,
+    int Specialize) {
 
   std::vector<mlir::func::FuncOp> FuncsToDelete;
   Module->walk([&](mlir::func::FuncOp Func) {
@@ -231,8 +248,7 @@ int poclMlirGenerateStandardWorkgroupFunctionNowrite(
     Func.erase();
   }
 
-  int Res =
-      runPoclPasses(Module, PoCLLLVMContext->MLIRContext, Command, Specialize);
+  int Res = runPoclPasses(Module, MLIRContext, Command, Specialize);
   return Res;
 }
 
@@ -242,6 +258,7 @@ int poclMlirGenerateStandardWorkgroupFunction(
   cl_context Ctx = Kernel->context;
   PoclLLVMContextData *PoCLLLVMContext =
       (PoclLLVMContextData *)Ctx->llvm_context_data;
+  mlir::MLIRContext *MLIRContext = PoCLLLVMContext->MLIRContext;
   char ProgramMLIRPath[POCL_MAX_PATHNAME_LENGTH];
   pocl_cache_program_mlir_path(ProgramMLIRPath, Kernel->program, DeviceI);
   std::string FinalBinaryPath = Cachedir;
@@ -251,8 +268,7 @@ int poclMlirGenerateStandardWorkgroupFunction(
     return CL_SUCCESS;
 
   mlir::OwningOpRef<mlir::ModuleOp> InputModule;
-  int Error = pocl::mlir::openFile(ProgramMLIRPath,
-                                   PoCLLLVMContext->MLIRContext, InputModule);
+  int Error = pocl::mlir::openFile(ProgramMLIRPath, MLIRContext, InputModule);
   if (Error)
     return Error;
 
@@ -260,7 +276,7 @@ int poclMlirGenerateStandardWorkgroupFunction(
                          Kernel->name);
 
   Error = poclMlirGenerateStandardWorkgroupFunctionNowrite(
-      Kernel, Command, InputModule, Specialize);
+      Kernel, Command, InputModule, MLIRContext, Specialize);
   if (Error)
     return Error;
 
@@ -272,12 +288,268 @@ int poclMlirGenerateStandardWorkgroupFunction(
   return pocl::mlir::writeOutput(InputModule, FinalBinaryPath.c_str());
 }
 
+int pocl_mlir_generate_hls_function_nowrite(
+    unsigned DeviceI, cl_device_id Device, cl_kernel Kernel,
+    _cl_command_node *Command, int Specialize, int RaiseToAffine,
+    int RunScaleHLSPasses, mlir::OwningOpRef<mlir::ModuleOp> &Mod,
+    mlir::MLIRContext *MLIRContext) {
+  std::string kernelName = Kernel->name;
+  mlir::GreedyRewriteConfig canonicalizerConfig;
+  canonicalizerConfig.setMaxIterations(400);
+
+  mlir::PassManager PMLower(MLIRContext);
+  PMLower.addPass(mlir::pocl::createConvertAffineParallelToAffineForPass());
+  if (mlir::failed(PMLower.run(*Mod))) {
+    POCL_MSG_PRINT_LLVM("Failed lowering the affine parallle to affine for\n");
+    return CL_FAILED;
+  }
+
+  if (pocl::mlir::runAffinePasses(Mod, RaiseToAffine) == CL_FAILED) {
+    POCL_MSG_PRINT_LLVM(
+        "Failed running the MLIR affine parallel lowering pass\n");
+    return CL_FAILED;
+  }
+
+#ifdef ENABLE_SCALEHLS
+#ifndef NDEBUG
+  llvm::DebugFlag = true;
+  llvm::setCurrentDebugType("scalehls");
+#endif
+  std::string topFunc = "pocl_mlir_";
+  topFunc += kernelName;
+  mlir::PassManager PM6(MLIRContext);
+  mlir::OpPassManager &nestedFunctionPM = PM6.nest<mlir::func::FuncOp>();
+  PM6.addPass(mlir::pocl::createDetectReductionPass());
+  PM6.addNestedPass<mlir::func::FuncOp>(
+      mlir::scalehls::createFuncPreprocessPass(topFunc));
+
+  bool useHidaDSE = pocl_get_bool_option("POCL_HIDA", 0);
+  if (useHidaDSE) {
+    //  // Use hida DSE flow for static loops
+    //  PM6.addNestedPass<mlir::func::FuncOp>(
+    //      mlir::scalehls::createMaterializeReductionPass());
+
+    //  // Apply the automatic design space exploration to the top function.
+    //  PM6.addPass(mlir::scalehls::createDesignSpaceExplorePass("./config.json"));
+
+    //  // Finally, estimate the QoR of the DSE result.
+    //  PM6.addPass(mlir::scalehls::createQoREstimationPass("./config.json"));
+  } else {
+
+    PM6.addNestedPass<mlir::func::FuncOp>(
+        mlir::scalehls::createAffineLoopFusionPass(100.0));
+    mlir::scalehls::addSimplifyAffineLoopPasses(nestedFunctionPM);
+    mlir::scalehls::addCreateSubviewPasses(nestedFunctionPM);
+    PM6.addNestedPass<mlir::func::FuncOp>(
+        mlir::scalehls::createRaiseAffineToCopyPass());
+    PM6.addNestedPass<mlir::func::FuncOp>(
+        mlir::scalehls::createSimplifyCopyPass());
+    PM6.addNestedPass<mlir::func::FuncOp>(
+        mlir::scalehls::createLowerCopyToAffinePass());
+    PM6.addNestedPass<mlir::func::FuncOp>(
+        mlir::memref::createFoldMemRefAliasOpsPass());
+    PM6.addNestedPass<mlir::func::FuncOp>(mlir::createCanonicalizerPass());
+
+    // Place dataflow buffers.
+    PM6.addNestedPass<mlir::func::FuncOp>(
+        mlir::scalehls::createPlaceDataflowBufferPass(
+            /*externalBufferThreshold*/ 128, true));
+
+    // Affine loop tiling.
+    PM6.addNestedPass<mlir::func::FuncOp>(
+        mlir::scalehls::createFuncPreprocessPass(topFunc));
+    // PM6.addNestedPass<mlir::func::FuncOp>(bufferization::createBufferLoopHoistingPass());
+    // PM6.addNestedPass<mlir::func::FuncOp>(
+    //     mlir::scalehls::createAffineLoopPerfectionPass());
+    PM6.addNestedPass<mlir::func::FuncOp>(
+        mlir::scalehls::createRemoveVariableBoundPass());
+    PM6.addNestedPass<mlir::func::FuncOp>(
+        mlir::scalehls::createAffineLoopOrderOptPass());
+    // PM6.addNestedPass<mlir::func::FuncOp>(mlir::scalehls::createAffineLoopTilePass(opts.loopTileSize));
+    PM6.addNestedPass<mlir::func::FuncOp>(
+        mlir::affine::createSimplifyAffineStructuresPass());
+    PM6.addNestedPass<mlir::func::FuncOp>(mlir::createCanonicalizerPass());
+
+    if (RunScaleHLSPasses) {
+      // Affine loop dataflowing.
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::affine::createLoopCoalescingPass());
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createCollapseMemrefUnitDimsPass());
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createAffineStoreForwardPass());
+
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createCreateDataflowFromAffinePass());
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createStreamDataflowTaskPass());
+      PM6.addNestedPass<mlir::func::FuncOp>(mlir::createCanonicalizerPass());
+
+      // Lower and optimize dataflow.
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createLowerDataflowPass());
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createEliminateMultiProducerPass());
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createEliminateMultiConsumerPass());
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createScheduleDataflowNodePass());
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createBalanceDataflowNodePass());
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createLowerCopyToAffinePass());
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createAffineStoreForwardPass());
+      PM6.addNestedPass<mlir::func::FuncOp>(mlir::createCanonicalizerPass());
+
+      // Parallelize dataflow.
+      if (/*opts.loopUnrollFactor*/ 0) {
+        PM6.addNestedPass<mlir::func::FuncOp>(
+            mlir::scalehls::createParallelizeDataflowNodePass(
+                /*loopUnrollFactor*/ 0, /*unrollPointLoopOnly=*/true,
+                /*complexityAware*/ true, /*correlationAware*/ true));
+        PM6.addNestedPass<mlir::func::FuncOp>(
+            mlir::affine::createSimplifyAffineStructuresPass());
+        PM6.addNestedPass<mlir::func::FuncOp>(mlir::createCanonicalizerPass());
+      }
+
+      // Memory optimization.
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createAffineStoreForwardPass());
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createReduceInitialIntervalPass());
+      PM6.addNestedPass<mlir::func::FuncOp>(mlir::createCanonicalizerPass());
+
+      // Convert dataflow to func.
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createCreateTokenStreamPass());
+      PM6.addPass(mlir::scalehls::createConvertDataflowToFuncPass());
+      PM6.addPass(mlir::createCanonicalizerPass());
+
+      // Directive-level optimization.
+      //  if (/*opts.axiInterface*/ true)
+      PM6.addNestedPass<mlir::func::FuncOp>(
+          mlir::scalehls::createLoopPipeliningPass());
+      PM6.addPass(mlir::scalehls::createArrayPartitionPass());
+    }
+    PM6.addPass(mlir::scalehls::createCreateAxiInterfacePass(topFunc));
+    PM6.addNestedPass<mlir::func::FuncOp>(
+        mlir::scalehls::createCreateHLSPrimitivePass());
+  }
+
+  PM6.addPass(mlir::createCanonicalizerPass());
+
+  if (mlir::failed(PM6.run(*Mod))) {
+    POCL_MSG_PRINT_LLVM("Failed running the MLIR HLS passes\n");
+    Mod->dump();
+    POCL_MSG_PRINT_LLVM("DUMP DONE\n");
+    return CL_FAILED;
+  }
+  if (mlir::failed(mlir::verify(*Mod))) {
+    POCL_MSG_PRINT_LLVM("Verification failed opt6");
+    Mod->dump();
+    return CL_FAILED;
+  }
+#else
+  POCL_MSG_PRINT_LLVM("ScaleHLS not enabled, skipping HLS passes\n");
+#endif
+
+  return CL_SUCCESS;
+}
+
+int pocl_mlir_generate_hls_function(unsigned DeviceI, cl_device_id Device,
+                                    cl_kernel Kernel, _cl_command_node *Command,
+                                    int Specialize, const char *cachedir) {
+  cl_context ctx = Kernel->context;
+  PoclLLVMContextData *PoCLLLVMContext =
+      (PoclLLVMContextData *)ctx->llvm_context_data;
+  mlir::MLIRContext *MLIRContext = PoCLLLVMContext->MLIRContext;
+  std::string ParallelStdPath = cachedir;
+  ParallelStdPath += POCL_PARALLEL_MLIR_FILENAME;
+  std::string FinalBinaryPath = cachedir;
+  FinalBinaryPath += "/parallel_hls.mlir";
+
+  if (pocl_exists(FinalBinaryPath.c_str()))
+    return CL_SUCCESS;
+
+  mlir::OwningOpRef<mlir::ModuleOp> InputModule;
+  int Error =
+      pocl::mlir::openFile(ParallelStdPath.c_str(), MLIRContext, InputModule);
+  if (Error)
+    return Error;
+
+  POCL_MSG_PRINT_GENERAL("Calling generate_hls_function for kernel %s\n",
+                         Kernel->name);
+
+  // Take a backup of the module in case we want to roll back optimizations
+  mlir::OwningOpRef<mlir::ModuleOp> outputModule = InputModule->clone();
+  if (pocl_mlir_generate_hls_function_nowrite(
+          DeviceI, Device, Kernel, Command, Specialize, Specialize, Specialize,
+          outputModule, MLIRContext)) {
+    POCL_MSG_PRINT_GENERAL(
+        "First HLS try failed, trying again without raising to affine\n");
+    outputModule.release();
+    outputModule = InputModule->clone();
+    if (pocl_mlir_generate_hls_function_nowrite(
+            DeviceI, Device, Kernel, Command, Specialize, 0, Specialize,
+            outputModule, MLIRContext)) {
+      POCL_MSG_PRINT_GENERAL("Second HLS try failed, trying again without "
+                             "running the more fragile ScaleHLS passes\n");
+      outputModule.release();
+      outputModule = InputModule->clone();
+      Error = pocl_mlir_generate_hls_function_nowrite(
+          DeviceI, Device, Kernel, Command, Specialize, 0, 0, outputModule,
+          MLIRContext);
+      if (Error)
+        return Error;
+    }
+  }
+
+#ifdef ENABLE_SCALEHLS
+  bool useHidaDSE = pocl_get_bool_option("POCL_HIDA", 0);
+  if (useHidaDSE) {
+    char tmp_affine_path[POCL_MAX_PATHNAME_LENGTH];
+    char tmp_affine_path2[POCL_MAX_PATHNAME_LENGTH];
+    pocl_cache_kernel_cachedir_path(tmp_affine_path, Kernel->program,
+                                    Command->program_device_i, Kernel,
+                                    "/parallel2.mlir", Command, Specialize);
+    pocl_cache_kernel_cachedir_path(tmp_affine_path2, Kernel->program,
+                                    Command->program_device_i, Kernel,
+                                    "/parallel3.mlir", Command, Specialize);
+    pocl::mlir::writeOutput(outputModule, tmp_affine_path);
+    std::string invokeHida =
+        std::string(SCALEHLS_OPT_EXECUTABLE) + " " +
+        std::string(tmp_affine_path) +
+        " -scalehls-dse-pipeline=\"target-spec=./config.json\""
+        " -debug-only=scalehls -o " +
+        std::string(tmp_affine_path2);
+
+    POCL_MSG_PRINT_ALMAIF("Hida cmd: %s\n", invokeHida.c_str());
+    system(invokeHida.c_str());
+
+    std::string invokeHida2 = std::string(SCALEHLS_OPT_EXECUTABLE) + " " +
+                              std::string(tmp_affine_path2) +
+                              " -scalehls-create-axi-interface"
+                              " -o " +
+                              FinalBinaryPath;
+    system(invokeHida2.c_str());
+    return 0;
+
+  } else
+#endif
+  {
+    return pocl::mlir::writeOutput(outputModule, FinalBinaryPath.c_str());
+  }
+}
+
 int poclMlirGenerateLlvmFunction(unsigned DeviceI, cl_device_id Device,
                                  cl_kernel Kernel, _cl_command_node *Command,
-                                 int Specialize, const char *Cachedir) {
+                                 int Specialize, const char *Cachedir,
+                                 int hasArgBufferLauncher) {
   cl_context Ctx = Kernel->context;
   PoclLLVMContextData *PoCLLLVMContext =
       (PoclLLVMContextData *)Ctx->llvm_context_data;
+  mlir::MLIRContext *MLIRContext = PoCLLLVMContext->MLIRContext;
   std::string ParallelStdPath = Cachedir;
   ParallelStdPath += POCL_PARALLEL_MLIR_FILENAME;
 
@@ -288,15 +560,18 @@ int poclMlirGenerateLlvmFunction(unsigned DeviceI, cl_device_id Device,
     return CL_SUCCESS;
 
   mlir::OwningOpRef<mlir::ModuleOp> InputModule;
-  int Error = pocl::mlir::openFile(ParallelStdPath.c_str(),
-                                   PoCLLLVMContext->MLIRContext, InputModule);
+  int Error =
+      pocl::mlir::openFile(ParallelStdPath.c_str(), MLIRContext, InputModule);
   if (Error)
     return Error;
 
   POCL_MSG_PRINT_GENERAL("Calling generate_llvm_function for kernel %s\n",
                          Kernel->name);
 
-  generateLlvmFunctionNowrite(InputModule, PoCLLLVMContext->MLIRContext);
+  Error = generateLlvmFunctionNowrite(InputModule, MLIRContext,
+                                      hasArgBufferLauncher);
+  if (Error)
+    return Error;
 
   std::string KernelLlvmMlirPath = Cachedir;
   KernelLlvmMlirPath += "/parallel_llvm.mlir";

@@ -387,10 +387,21 @@ set_property(TEST
 
 # Label tests that work with MLIR
 set_property(TEST
+  "regression/barrier_between_two_for_loops_cbs"
+  "regression/barrier_just_before_return_cbs"
   "regression/clSetKernelArg_overwriting_the_previous_kernel's_args_cbs"
+  "regression/for-loop_with_a_variable_iteration_count_cbs"
+  "regression/for-loop_with_computation_after_the_brexit_cbs"
+  "regression/simple_for-loop_with_a_barrier_inside_cbs"
+  "regression/test_alignment_with_dynamic_wg3_cbs"
+  "regression/test_issue_1525"
+  "regression/test_issue_1826_cbs"
+  "regression/test_issue_1962_cbs"
   "regression/test_issue_445_cbs"
+  "regression/test_issue_577_cbs"
   "regression/test_issue_757_cbs"
   "regression/test_workitem_func_outside_kernel_cbs"
+  "regression/undominated_variable_from_conditional_barrier_handling_cbs"
   APPEND PROPERTY LABELS "mlir")
 
 if(ENABLE_LEVEL0)

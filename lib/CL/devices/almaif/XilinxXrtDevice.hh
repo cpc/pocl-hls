@@ -26,6 +26,8 @@
 
 #include "AlmaIFDevice.hh"
 
+#include <vector>
+
 class XilinxXrtExternalRegion;
 
 // This class abstracts the Almaif device instantiated on a Xilinx (PCIe) FPGA.
@@ -43,9 +45,13 @@ public:
                       const std::string &XclbinFile,
                       const std::string &ExternalMemoryParameters, unsigned j);
   ~XilinxXrtDevice() override;
+  void loadProgramToDevice(almaif_kernel_data_s *KernelData, cl_kernel Kernel,
+                           _cl_command_node *Command) override;
+  void unloadProgram() override;
   // Reconfigures the FPGA
   void programBitstream(const std::string &XrtKernelNamePrefix,
                         const std::string &XclbinFile, unsigned j);
+  bool isHardwareReady() override { return Kernel != nullptr; }
 
   // Allocate buffers from either on-chip or external memory regions
   // (Directs to either XilinxXrtRegion or XilinxXrtExternalRegion)
@@ -66,11 +72,26 @@ public:
   int pipeCount() override;
 
 private:
-  XilinxXrtExternalRegion *ExternalXRTMemory;
+  XilinxXrtExternalRegion *ExternalXRTMemory = nullptr;
   void *Kernel;
   int XilinxXrtDeviceInitDone_ = 0;
   int PipeCount_ = 0;
   int *AllocatedPipes_;
+  bool hasActiveProgram_ = false;
+  bool RunningOnRealFPGA_ = true;
+  struct ExternalBuffer {
+    pocl_mem_identifier *P;
+    size_t Size;
+    // Host-side shadow copy.  Pre-allocated (calloc) when no xclbin is loaded
+    // yet so that writeDataToDevice() can mirror writes and
+    // freeAndCopyExternalBuffersOutOfDevice() can recover data without syncing
+    // from the device.  Filled by CopyFromMMAP on normal reprogram paths.
+    // Null while the xrt::bo owns the data.
+    void *HostData;
+  };
+  std::vector<ExternalBuffer> ExternalBuffers_;
+  void freeAndCopyExternalBuffersOutOfDevice();
+  void reallocateAndCopyBuffersBackToDevice();
 };
 
 #endif
